@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GOLD AI LAB</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="script.js" defer></script>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2>GOLD<span>AI</span></h2>
+    <p class="sub">INTELLIGENCE LAB</p>
+
+    <nav>
+        <a class="active" href="#overview">◈ Overview</a>
+        <a href="#market">◷ Market Monitor</a>
+        <a href="#database">▤ Database</a>
+        <a href="#news">▣ News Center</a>
+        <a href="#research">✧ AI Research</a>
+        <a href="#system">⚙ System Status</a>
+    </nav>
+
+    <div class="sidebar-bottom">
+        <span class="dot"></span> Cloud System
+        <small>GOLD AI LAB v1.0</small>
+    </div>
+</div>
+
+<main>
+    <header>
+        <div>
+            <h1>Dashboard Overview</h1>
+            <p>Welcome to your AI research environment.</p>
+        </div>
+        <div class="header-right">
+            <span id="clock">--:--:--</span>
+            <span class="live"><i></i> LIVE MONITOR</span>
+        </div>
+    </header>
+
+    <section class="stats" id="overview">
+        <div class="stat-card">
+            <small>API STATUS</small>
+            <h2 id="apiStatus">Checking...</h2>
+            <span>Backend connection</span>
+        </div>
+        <div class="stat-card">
+            <small>DATABASE</small>
+            <h2 id="dbStatus">Checking...</h2>
+            <span>Supabase PostgreSQL</span>
+        </div>
+        <div class="stat-card">
+            <small>DATA TABLES</small>
+            <h2 id="tableCount">5</h2>
+            <span>Registered tables</span>
+        </div>
+        <div class="stat-card">
+            <small>TOTAL RECORDS</small>
+            <h2 id="totalRecords">--</h2>
+            <span>Stored database records</span>
+        </div>
+    </section>
+
+    <section class="panel" id="market">
+        <div class="panel-heading">
+            <div>
+                <h2>Market Monitor</h2>
+                <p>Read-only market data overview</p>
+            </div>
+            <span class="tag">DATA MONITOR</span>
+        </div>
+        <div class="market-placeholder">
+            <div class="chart-icon">⌁</div>
+            <h3>Market Data Waiting</h3>
+            <p>Historical market data will appear here after a data source is connected.</p>
+        </div>
+    </section>
+
+    <section class="two-column">
+        <div class="panel" id="database">
+            <div class="panel-heading">
+                <div>
+                    <h2>Database Monitor</h2>
+                    <p>Table record statistics</p>
+                </div>
+            </div>
+            <div id="tableList" class="table-list">
+                Loading database information...
+            </div>
+        </div>
+
+        <div class="panel" id="research">
+            <div class="panel-heading">
+                <div>
+                    <h2>AI Research</h2>
+                    <p>Research environment</p>
+                </div>
+            </div>
+            <div class="research-box">
+                <div class="brain">✧</div>
+                <h3>Research Engine</h3>
+                <p>AI research module is awaiting configuration.</p>
+                <span class="tag">NOT CONFIGURED</span>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel" id="news">
+        <div class="panel-heading">
+            <div>
+                <h2>News Center</h2>
+                <p>Market-related news storage</p>
+            </div>
+        </div>
+        <div id="newsInfo" class="empty">
+            News source has not been connected yet.
+        </div>
+    </section>
+
+    <section class="panel" id="system">
+        <div class="panel-heading">
+            <div>
+                <h2>System Activity</h2>
+                <p>Backend and database connectivity</p>
+            </div>
+        </div>
+        <div id="systemLog" class="log">
+            Initializing system...
+        </div>
+    </section>
+
+    <footer>
+        GOLD AI LAB © 2026 · CLOUD RESEARCH DASHBOARD
+    </footer>
+</main>
+
+</body>
+</html>
