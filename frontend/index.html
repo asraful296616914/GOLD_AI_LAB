@@ -3,138 +3,433 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GOLD AI LAB</title>
-    <link rel="stylesheet" href="style.css">
-    <script src="script.js" defer></script>
+    <meta name="theme-color" content="#080d18">
+
+    <title>GOLD AI LAB | Market Intelligence</title>
+
+    <link rel="stylesheet" href="/static/style.css">
 </head>
+
 <body>
 
-<div class="sidebar">
-    <h2>GOLD<span>AI</span></h2>
-    <p class="sub">INTELLIGENCE LAB</p>
+<div class="app-container">
 
-    <nav>
-        <a class="active" href="#overview">◈ Overview</a>
-        <a href="#market">◷ Market Monitor</a>
-        <a href="#database">▤ Database</a>
-        <a href="#news">▣ News Center</a>
-        <a href="#research">✧ AI Research</a>
-        <a href="#system">⚙ System Status</a>
-    </nav>
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
 
-    <div class="sidebar-bottom">
-        <span class="dot"></span> Cloud System
-        <small>GOLD AI LAB v1.0</small>
-    </div>
-</div>
-
-<main>
-    <header>
-        <div>
-            <h1>Dashboard Overview</h1>
-            <p>Welcome to your AI research environment.</p>
-        </div>
-        <div class="header-right">
-            <span id="clock">--:--:--</span>
-            <span class="live"><i></i> LIVE MONITOR</span>
-        </div>
-    </header>
-
-    <section class="stats" id="overview">
-        <div class="stat-card">
-            <small>API STATUS</small>
-            <h2 id="apiStatus">Checking...</h2>
-            <span>Backend connection</span>
-        </div>
-        <div class="stat-card">
-            <small>DATABASE</small>
-            <h2 id="dbStatus">Checking...</h2>
-            <span>Supabase PostgreSQL</span>
-        </div>
-        <div class="stat-card">
-            <small>DATA TABLES</small>
-            <h2 id="tableCount">5</h2>
-            <span>Registered tables</span>
-        </div>
-        <div class="stat-card">
-            <small>TOTAL RECORDS</small>
-            <h2 id="totalRecords">--</h2>
-            <span>Stored database records</span>
-        </div>
-    </section>
-
-    <section class="panel" id="market">
-        <div class="panel-heading">
+        <div class="brand">
+            <div class="brand-icon">G</div>
             <div>
-                <h2>Market Monitor</h2>
-                <p>Read-only market data overview</p>
+                <h2>GOLD AI LAB</h2>
+                <span>MARKET INTELLIGENCE</span>
             </div>
-            <span class="tag">DATA MONITOR</span>
         </div>
-        <div class="market-placeholder">
-            <div class="chart-icon">⌁</div>
-            <h3>Market Data Waiting</h3>
-            <p>Historical market data will appear here after a data source is connected.</p>
-        </div>
-    </section>
 
-    <section class="two-column">
-        <div class="panel" id="database">
-            <div class="panel-heading">
+        <div class="sidebar-label">MAIN MENU</div>
+
+        <nav class="navigation">
+            <a href="#dashboard" class="nav-item active">
+                <span>▦</span> Dashboard
+            </a>
+
+            <a href="#market" class="nav-item">
+                <span>◈</span> Market Monitor
+            </a>
+
+            <a href="#research" class="nav-item">
+                <span>⌘</span> AI Research
+            </a>
+
+            <a href="#news" class="nav-item">
+                <span>▤</span> News Center
+            </a>
+
+            <a href="#events" class="nav-item">
+                <span>◷</span> Economic Events
+            </a>
+        </nav>
+
+        <div class="sidebar-label">SYSTEM</div>
+
+        <nav class="navigation">
+            <a href="#database" class="nav-item">
+                <span>▣</span> Database Monitor
+            </a>
+
+            <a href="#activity" class="nav-item">
+                <span>⌁</span> System Activity
+            </a>
+        </nav>
+
+        <div class="sidebar-bottom">
+            <div class="connection-indicator">
+                <span class="status-dot" id="sidebar-status-dot"></span>
+                <div>
+                    <strong id="sidebar-status">Connecting...</strong>
+                    <small>Cloud infrastructure</small>
+                </div>
+            </div>
+
+            <div class="sidebar-version">
+                GOLD AI LAB v1.2.0
+            </div>
+        </div>
+
+    </aside>
+
+
+    <!-- MAIN CONTENT -->
+    <main class="main-content">
+
+        <!-- TOPBAR -->
+        <header class="topbar">
+
+            <div>
+                <div class="breadcrumb">Workspace / Dashboard</div>
+                <h1>Dashboard Overview</h1>
+            </div>
+
+            <div class="topbar-right">
+
+                <div class="live-clock" id="clock">
+                    --:--:--
+                </div>
+
+                <button class="refresh-button" id="refresh-button">
+                    ↻ Refresh
+                </button>
+
+                <div class="user-avatar">G</div>
+
+            </div>
+
+        </header>
+
+
+        <!-- DASHBOARD -->
+        <section id="dashboard">
+
+            <div class="welcome-section">
+                <div>
+                    <h2>Welcome to GOLD AI LAB</h2>
+                    <p>
+                        Your centralized market research and intelligence workspace.
+                    </p>
+                </div>
+
+                <div class="live-badge">
+                    <span class="status-dot"></span>
+                    SYSTEM MONITOR
+                </div>
+            </div>
+
+
+            <!-- STATUS CARDS -->
+            <div class="stats-grid">
+
+                <div class="stat-card">
+                    <div class="stat-top">
+                        <span>API STATUS</span>
+                        <span class="stat-icon">⌘</span>
+                    </div>
+
+                    <h2 id="api-status">Checking...</h2>
+                    <p>Backend connectivity</p>
+                </div>
+
+
+                <div class="stat-card">
+                    <div class="stat-top">
+                        <span>DATABASE</span>
+                        <span class="stat-icon">▣</span>
+                    </div>
+
+                    <h2 id="database-status">Checking...</h2>
+                    <p>PostgreSQL connection</p>
+                </div>
+
+
+                <div class="stat-card">
+                    <div class="stat-top">
+                        <span>DATA TABLES</span>
+                        <span class="stat-icon">▤</span>
+                    </div>
+
+                    <h2 id="table-count">5</h2>
+                    <p>Connected database tables</p>
+                </div>
+
+
+                <div class="stat-card">
+                    <div class="stat-top">
+                        <span>LAST UPDATED</span>
+                        <span class="stat-icon">◷</span>
+                    </div>
+
+                    <h2 id="last-updated">--:--</h2>
+                    <p>Dashboard refresh time</p>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- MARKET MONITOR -->
+        <section id="market" class="dashboard-section">
+
+            <div class="section-heading">
+                <div>
+                    <h2>Market Monitor</h2>
+                    <p>Market data overview and monitoring</p>
+                </div>
+
+                <span class="section-tag">READ ONLY</span>
+            </div>
+
+
+            <div class="panel market-panel">
+
+                <div class="panel-header">
+                    <div>
+                        <h3>Gold Market</h3>
+                        <p>XAUUSD · Historical data workspace</p>
+                    </div>
+
+                    <span class="data-status">Awaiting data source</span>
+                </div>
+
+
+                <div class="chart-placeholder">
+
+                    <div class="chart-message">
+                        <div class="chart-icon">⌁</div>
+
+                        <h3>Market Data Not Connected</h3>
+
+                        <p>
+                            Connect a verified market data source
+                            to display historical price information.
+                        </p>
+
+                    </div>
+
+                </div>
+
+
+                <div class="market-footer">
+                    <span>Data source: Not configured</span>
+                    <span>Mode: Read-only research</span>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- AI RESEARCH -->
+        <section id="research" class="dashboard-section">
+
+            <div class="section-heading">
+                <div>
+                    <h2>AI Research Center</h2>
+                    <p>Educational market explanations and research</p>
+                </div>
+            </div>
+
+
+            <div class="panel research-panel">
+
+                <div class="research-icon">✦</div>
+
+                <div class="research-content">
+                    <h3>AI Research Workspace</h3>
+
+                    <p>
+                        AI-powered educational research tools will appear here.
+                        This section can summarize market news, explain economic
+                        concepts and organize historical market information.
+                    </p>
+
+                    <span class="coming-soon">RESEARCH MODULE — COMING SOON</span>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- NEWS CENTER -->
+        <section id="news" class="dashboard-section">
+
+            <div class="section-heading">
+                <div>
+                    <h2>News Center</h2>
+                    <p>Financial and market-related news</p>
+                </div>
+
+                <span class="section-tag">NEWS FEED</span>
+            </div>
+
+
+            <div class="panel">
+
+                <div class="empty-state">
+                    <div class="empty-icon">▤</div>
+
+                    <h3>No News Available</h3>
+
+                    <p>
+                        News articles will appear here after a news data
+                        source is connected.
+                    </p>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- ECONOMIC EVENTS -->
+        <section id="events" class="dashboard-section">
+
+            <div class="section-heading">
+                <div>
+                    <h2>Economic Calendar</h2>
+                    <p>Upcoming and historical economic events</p>
+                </div>
+            </div>
+
+
+            <div class="panel">
+
+                <div class="empty-state">
+                    <div class="empty-icon">◷</div>
+
+                    <h3>No Economic Events</h3>
+
+                    <p>
+                        Economic calendar information will appear here
+                        when a verified data source is connected.
+                    </p>
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- DATABASE MONITOR -->
+        <section id="database" class="dashboard-section">
+
+            <div class="section-heading">
                 <div>
                     <h2>Database Monitor</h2>
-                    <p>Table record statistics</p>
+                    <p>Supabase PostgreSQL database overview</p>
                 </div>
-            </div>
-            <div id="tableList" class="table-list">
-                Loading database information...
-            </div>
-        </div>
 
-        <div class="panel" id="research">
-            <div class="panel-heading">
+                <span class="section-tag">POSTGRESQL</span>
+            </div>
+
+
+            <div class="panel">
+
+                <div class="panel-header">
+                    <div>
+                        <h3>Database Tables</h3>
+                        <p>Current record counts</p>
+                    </div>
+
+                    <span id="db-connection-label" class="data-status">
+                        Checking...
+                    </span>
+                </div>
+
+
+                <div class="table-wrapper">
+
+                    <table class="data-table">
+
+                        <thead>
+                            <tr>
+                                <th>TABLE NAME</th>
+                                <th>RECORDS</th>
+                                <th>STATUS</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="database-table-body">
+
+                            <tr>
+                                <td colspan="3">
+                                    Loading database information...
+                                </td>
+                            </tr>
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- SYSTEM ACTIVITY -->
+        <section id="activity" class="dashboard-section">
+
+            <div class="section-heading">
                 <div>
-                    <h2>AI Research</h2>
-                    <p>Research environment</p>
+                    <h2>System Activity</h2>
+                    <p>Application status and monitoring logs</p>
                 </div>
             </div>
-            <div class="research-box">
-                <div class="brain">✧</div>
-                <h3>Research Engine</h3>
-                <p>AI research module is awaiting configuration.</p>
-                <span class="tag">NOT CONFIGURED</span>
-            </div>
-        </div>
-    </section>
 
-    <section class="panel" id="news">
-        <div class="panel-heading">
+
+            <div class="panel">
+
+                <div class="activity-list" id="activity-list">
+
+                    <div class="activity-item">
+                        <span class="activity-dot"></span>
+
+                        <div>
+                            <strong>Dashboard initialized</strong>
+                            <p>GOLD AI LAB interface loaded.</p>
+                        </div>
+
+                        <small>System</small>
+                    </div>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- FOOTER -->
+        <footer class="footer">
+
             <div>
-                <h2>News Center</h2>
-                <p>Market-related news storage</p>
+                <strong>GOLD AI LAB</strong>
+                <span>Market Intelligence Workspace</span>
             </div>
-        </div>
-        <div id="newsInfo" class="empty">
-            News source has not been connected yet.
-        </div>
-    </section>
 
-    <section class="panel" id="system">
-        <div class="panel-heading">
             <div>
-                <h2>System Activity</h2>
-                <p>Backend and database connectivity</p>
+                Educational research only · Read-only mode
             </div>
-        </div>
-        <div id="systemLog" class="log">
-            Initializing system...
-        </div>
-    </section>
 
-    <footer>
-        GOLD AI LAB © 2026 · CLOUD RESEARCH DASHBOARD
-    </footer>
-</main>
+        </footer>
+
+    </main>
+
+</div>
+
+
+<script src="/static/script.js"></script>
 
 </body>
 </html>
