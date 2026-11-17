@@ -544,10 +544,8 @@ body {
     }
 
     .brand > div:last-child,
-    .sidebar-label,
-    .nav-item:not(.active),
-    .nav-item.active {
-        font-size: 0;
+    .sidebar-label {
+        display: none;
     }
 
     .navigation {
