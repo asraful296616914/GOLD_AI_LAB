@@ -8,6 +8,8 @@
     <title>GOLD AI LAB | Market Intelligence</title>
 
     <link rel="stylesheet" href="/static/style.css">
+
+    <script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 
 <body>
@@ -27,37 +29,18 @@
         <div class="sidebar-label">MAIN MENU</div>
 
         <nav class="navigation">
-            <a href="#dashboard" class="nav-item active">
-                <span>▦</span> Dashboard
-            </a>
-
-            <a href="#market" class="nav-item">
-                <span>◈</span> Market Monitor
-            </a>
-
-            <a href="#research" class="nav-item">
-                <span>⌘</span> AI Research
-            </a>
-
-            <a href="#news" class="nav-item">
-                <span>▤</span> News Center
-            </a>
-
-            <a href="#events" class="nav-item">
-                <span>◷</span> Economic Events
-            </a>
+            <a href="#dashboard" class="nav-item active"><span>▦</span> Dashboard</a>
+            <a href="#market" class="nav-item"><span>◈</span> Market Monitor</a>
+            <a href="#research" class="nav-item"><span>⌘</span> AI Research</a>
+            <a href="#news" class="nav-item"><span>▤</span> News Center</a>
+            <a href="#events" class="nav-item"><span>◷</span> Economic Events</a>
         </nav>
 
         <div class="sidebar-label">SYSTEM</div>
 
         <nav class="navigation">
-            <a href="#database" class="nav-item">
-                <span>▣</span> Database Monitor
-            </a>
-
-            <a href="#activity" class="nav-item">
-                <span>⌁</span> System Activity
-            </a>
+            <a href="#database" class="nav-item"><span>▣</span> Database Monitor</a>
+            <a href="#activity" class="nav-item"><span>⌁</span> System Activity</a>
         </nav>
 
         <div class="sidebar-bottom">
@@ -69,9 +52,7 @@
                 </div>
             </div>
 
-            <div class="sidebar-version">
-                GOLD AI LAB v1.2.0
-            </div>
+            <div class="sidebar-version">GOLD AI LAB v1.4.0</div>
         </div>
 
     </aside>
@@ -80,7 +61,6 @@
     <main class="main-content">
 
         <header class="topbar">
-
             <div>
                 <div class="breadcrumb">Workspace / Dashboard</div>
                 <h1>Dashboard Overview</h1>
@@ -95,7 +75,6 @@
 
                 <div class="user-avatar">G</div>
             </div>
-
         </header>
 
 
@@ -104,9 +83,7 @@
             <div class="welcome-section">
                 <div>
                     <h2>Welcome to GOLD AI LAB</h2>
-                    <p>
-                        Your centralized market research and intelligence workspace.
-                    </p>
+                    <p>Your centralized market research and intelligence workspace.</p>
                 </div>
 
                 <div class="live-badge">
@@ -115,7 +92,6 @@
                 </div>
             </div>
 
-
             <div class="stats-grid">
 
                 <div class="stat-card">
@@ -123,40 +99,33 @@
                         <span>API STATUS</span>
                         <span class="stat-icon">⌘</span>
                     </div>
-
                     <h2 id="api-status">Checking...</h2>
                     <p>Backend connectivity</p>
                 </div>
-
 
                 <div class="stat-card">
                     <div class="stat-top">
                         <span>DATABASE</span>
                         <span class="stat-icon">▣</span>
                     </div>
-
                     <h2 id="database-status">Checking...</h2>
                     <p>PostgreSQL connection</p>
                 </div>
-
 
                 <div class="stat-card">
                     <div class="stat-top">
                         <span>DATA TABLES</span>
                         <span class="stat-icon">▤</span>
                     </div>
-
                     <h2 id="table-count">5</h2>
                     <p>Connected database tables</p>
                 </div>
-
 
                 <div class="stat-card">
                     <div class="stat-top">
                         <span>LAST UPDATED</span>
                         <span class="stat-icon">◷</span>
                     </div>
-
                     <h2 id="last-updated">--:--</h2>
                     <p>Dashboard refresh time</p>
                 </div>
@@ -166,55 +135,76 @@
         </section>
 
 
+        <!-- MARKET MONITOR -->
+
         <section id="market" class="dashboard-section">
 
             <div class="section-heading">
                 <div>
                     <h2>Market Monitor</h2>
-                    <p>Market data overview and monitoring</p>
+                    <p>Pyth market data · Read-only research</p>
                 </div>
 
-                <span class="section-tag">READ ONLY</span>
+                <span class="section-tag">MARKET DATA</span>
             </div>
-
 
             <div class="panel market-panel">
 
-                <div class="panel-header">
-                    <div>
-                        <h3>Gold Market</h3>
-                        <p>XAUUSD · Historical data workspace</p>
+                <div class="market-toolbar">
+
+                    <div class="market-instrument">
+                        <span class="instrument-label">INSTRUMENT</span>
+                        <select id="market-symbol">
+                            <option value="">Loading Gold feeds...</option>
+                        </select>
                     </div>
 
-                    <span class="data-status">Awaiting data source</span>
+                    <div class="market-price-block">
+                        <span class="instrument-label">LATEST CANDLE CLOSE</span>
+                        <strong id="market-price">--</strong>
+                    </div>
+
+                    <div class="market-status" id="market-status">
+                        Connecting to Pyth...
+                    </div>
+
                 </div>
 
 
-                <div class="chart-placeholder">
+                <div class="timeframe-toolbar">
 
-                    <div class="chart-message">
-                        <div class="chart-icon">⌁</div>
+                    <span>TIMEFRAME</span>
 
-                        <h3>Market Data Not Connected</h3>
-
-                        <p>
-                            Connect a verified market data source
-                            to display historical price information.
-                        </p>
+                    <div class="timeframe-buttons">
+                        <button class="timeframe-btn" data-resolution="1">M1</button>
+                        <button class="timeframe-btn active" data-resolution="5">M5</button>
+                        <button class="timeframe-btn" data-resolution="15">M15</button>
+                        <button class="timeframe-btn" data-resolution="60">H1</button>
+                        <button class="timeframe-btn" data-resolution="240">H4</button>
                     </div>
 
+                </div>
+
+
+                <div id="market-chart" class="market-chart">
+                    <div class="chart-loading" id="chart-message">
+                        Loading market data...
+                    </div>
                 </div>
 
 
                 <div class="market-footer">
-                    <span>Data source: Not configured</span>
-                    <span>Mode: Read-only research</span>
+                    <span id="market-source">Source: Pyth</span>
+                    <span id="market-updated">Waiting for data...</span>
+                    <span>Read-only mode</span>
                 </div>
 
             </div>
 
         </section>
 
+
+        <!-- AI RESEARCH -->
 
         <section id="research" class="dashboard-section">
 
@@ -225,29 +215,25 @@
                 </div>
             </div>
 
-
             <div class="panel research-panel">
-
                 <div class="research-icon">✦</div>
 
                 <div class="research-content">
                     <h3>AI Research Workspace</h3>
 
                     <p>
-                        AI-powered educational research tools will appear here.
-                        This section can summarize market news, explain economic
-                        concepts and organize historical market information.
+                        Educational tools for understanding market data,
+                        financial news and economic concepts.
                     </p>
 
-                    <span class="coming-soon">
-                        RESEARCH MODULE — COMING SOON
-                    </span>
+                    <span class="coming-soon">COMING SOON</span>
                 </div>
-
             </div>
 
         </section>
 
+
+        <!-- NEWS -->
 
         <section id="news" class="dashboard-section">
 
@@ -256,28 +242,20 @@
                     <h2>News Center</h2>
                     <p>Financial and market-related news</p>
                 </div>
-
-                <span class="section-tag">NEWS FEED</span>
             </div>
 
-
             <div class="panel">
-
                 <div class="empty-state">
                     <div class="empty-icon">▤</div>
-
                     <h3>No News Available</h3>
-
-                    <p>
-                        News articles will appear here after a news data
-                        source is connected.
-                    </p>
+                    <p>News articles will appear here after a news source is connected.</p>
                 </div>
-
             </div>
 
         </section>
 
+
+        <!-- ECONOMIC EVENTS -->
 
         <section id="events" class="dashboard-section">
 
@@ -288,24 +266,18 @@
                 </div>
             </div>
 
-
             <div class="panel">
-
                 <div class="empty-state">
                     <div class="empty-icon">◷</div>
-
                     <h3>No Economic Events</h3>
-
-                    <p>
-                        Economic calendar information will appear here
-                        when a verified data source is connected.
-                    </p>
+                    <p>Economic calendar data will appear here after a source is connected.</p>
                 </div>
-
             </div>
 
         </section>
 
+
+        <!-- DATABASE -->
 
         <section id="database" class="dashboard-section">
 
@@ -314,10 +286,7 @@
                     <h2>Database Monitor</h2>
                     <p>Supabase PostgreSQL database overview</p>
                 </div>
-
-                <span class="section-tag">POSTGRESQL</span>
             </div>
-
 
             <div class="panel">
 
@@ -327,16 +296,11 @@
                         <p>Current record counts</p>
                     </div>
 
-                    <span id="db-connection-label" class="data-status">
-                        Checking...
-                    </span>
+                    <span id="db-connection-label" class="data-status">Checking...</span>
                 </div>
 
-
                 <div class="table-wrapper">
-
                     <table class="data-table">
-
                         <thead>
                             <tr>
                                 <th>TABLE NAME</th>
@@ -347,20 +311,18 @@
 
                         <tbody id="database-table-body">
                             <tr>
-                                <td colspan="3">
-                                    Loading database information...
-                                </td>
+                                <td colspan="3">Loading database information...</td>
                             </tr>
                         </tbody>
-
                     </table>
-
                 </div>
 
             </div>
 
         </section>
 
+
+        <!-- ACTIVITY -->
 
         <section id="activity" class="dashboard-section">
 
@@ -371,24 +333,17 @@
                 </div>
             </div>
 
-
             <div class="panel">
-
                 <div class="activity-list" id="activity-list">
-
                     <div class="activity-item">
                         <span class="activity-dot"></span>
-
                         <div>
                             <strong>Dashboard initialized</strong>
                             <p>GOLD AI LAB interface loaded.</p>
                         </div>
-
                         <small>System</small>
                     </div>
-
                 </div>
-
             </div>
 
         </section>
@@ -400,15 +355,12 @@
                 <span>Market Intelligence Workspace</span>
             </div>
 
-            <div>
-                Educational research only · Read-only mode
-            </div>
+            <div>Educational research only · Read-only mode</div>
         </footer>
 
     </main>
 
 </div>
-
 
 <script src="/static/script.js"></script>
 
