@@ -11,14 +11,20 @@ from sqlalchemy import text
 
 from app.database import engine
 
-# --------------------------------------------------
-# Configuration
-# --------------------------------------------------
+
+# ==================================================
+# CONFIGURATION
+# ==================================================
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 
 PYTH_API_URL = "https://pyth.dourolabs.app/v1"
+
+# Gold feed supports fixed_rate@200ms and slower channels.
+PYTH_CHANNEL = "fixed_rate@200ms"
+
+GOLD_SYMBOL = "Metal.XAU/USD"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gold-ai-lab")
@@ -26,7 +32,7 @@ logger = logging.getLogger("gold-ai-lab")
 app = FastAPI(
     title="GOLD AI LAB",
     description="Read-only market data and research dashboard",
-    version="1.5.0"
+    version="1.6.0"
 )
 
 app.mount(
@@ -46,11 +52,12 @@ TABLES = [
 RESOLUTIONS = {"1", "5", "15", "60", "240"}
 
 
-# --------------------------------------------------
-# Pyth Authentication
-# --------------------------------------------------
+# ==================================================
+# PYTH AUTHENTICATION
+# ==================================================
 
 def get_pyth_headers():
+
     api_key = os.getenv("PYTH_API_KEY")
 
     if not api_key:
@@ -60,18 +67,25 @@ def get_pyth_headers():
         )
 
     return {
-        "Authorization": f"Bearer {api_key}"
+        "Authorization": f"Bearer {api_key.strip()}"
     }
 
 
-# --------------------------------------------------
-# Pyth HTTP Request Helper
-# --------------------------------------------------
+# ==================================================
+# PYTH REQUEST HELPER
+# ==================================================
 
-async def pyth_get(path, params=None, headers=None, timeout=20):
+async def pyth_get(
+    path,
+    params=None,
+    headers=None,
+    timeout=30
+):
+
     url = f"{PYTH_API_URL}{path}"
 
     try:
+
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=True
@@ -85,7 +99,17 @@ async def pyth_get(path, params=None, headers=None, timeout=20):
 
             return response
 
+    except httpx.TimeoutException:
+
+        logger.exception("Pyth request timed out")
+
+        raise HTTPException(
+            status_code=504,
+            detail="Pyth request timed out"
+        )
+
     except httpx.RequestError as error:
+
         logger.exception(
             "Pyth connection error: %s",
             type(error).__name__
@@ -95,28 +119,82 @@ async def pyth_get(path, params=None, headers=None, timeout=20):
             status_code=502,
             detail={
                 "message": "Could not connect to Pyth",
-                "error_type": type(error).__name__,
-                "error": str(error)[:250]
+                "error_type": type(error).__name__
             }
         )
 
 
-# --------------------------------------------------
-# Dashboard
-# --------------------------------------------------
+# ==================================================
+# PYTH ERROR HANDLER
+# ==================================================
+
+def handle_pyth_error(response, endpoint):
+
+    status = response.status_code
+
+    if status == 401:
+        raise HTTPException(
+            status_code=401,
+            detail="Pyth authentication failed. Check PYTH_API_KEY."
+        )
+
+    if status == 403:
+        raise HTTPException(
+            status_code=403,
+            detail="Pyth credentials do not have access to this feed."
+        )
+
+    if status == 404:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Pyth could not find this symbol on the requested channel, or it is not visible to these credentials.",
+                "endpoint": endpoint,
+                "channel": PYTH_CHANNEL,
+                "symbol": GOLD_SYMBOL,
+                "provider_response": response.text[:500]
+            }
+        )
+
+    if status == 429:
+        raise HTTPException(
+            status_code=429,
+            detail="Pyth API rate limit reached. Try again later."
+        )
+
+    if status != 200:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Pyth API request failed",
+                "endpoint": endpoint,
+                "http_status": status,
+                "provider_response": response.text[:500]
+            }
+        )
+
+
+# ==================================================
+# DASHBOARD
+# ==================================================
 
 @app.get("/", include_in_schema=False)
 def dashboard():
-    return FileResponse(FRONTEND_DIR / "index.html")
+
+    return FileResponse(
+        FRONTEND_DIR / "index.html"
+    )
 
 
-# --------------------------------------------------
-# Health Check
-# --------------------------------------------------
+# ==================================================
+# HEALTH CHECK
+# ==================================================
 
 @app.get("/health")
 def health():
+
     try:
+
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
 
@@ -125,7 +203,8 @@ def health():
             "database": "connected"
         }
 
-    except Exception as error:
+    except Exception:
+
         logger.exception("Database health check failed")
 
         raise HTTPException(
@@ -134,17 +213,21 @@ def health():
         )
 
 
-# --------------------------------------------------
-# Database Summary
-# --------------------------------------------------
+# ==================================================
+# DATABASE SUMMARY
+# ==================================================
 
 @app.get("/database-summary")
 def database_summary():
+
     try:
+
         results = {}
 
         with engine.connect() as connection:
+
             for table in TABLES:
+
                 query = text(
                     f"SELECT COUNT(*) FROM public.{table}"
                 )
@@ -160,6 +243,7 @@ def database_summary():
         }
 
     except Exception:
+
         logger.exception("Database summary failed")
 
         raise HTTPException(
@@ -168,12 +252,13 @@ def database_summary():
         )
 
 
-# --------------------------------------------------
-# API Status
-# --------------------------------------------------
+# ==================================================
+# API STATUS
+# ==================================================
 
 @app.get("/api/status")
 def api_status():
+
     return {
         "project": "GOLD AI LAB",
         "backend": "online",
@@ -183,9 +268,9 @@ def api_status():
     }
 
 
-# --------------------------------------------------
+# ==================================================
 # PYTH CONNECTION DIAGNOSTICS
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/api/pyth/diagnostics")
 async def pyth_diagnostics():
@@ -207,6 +292,7 @@ async def pyth_diagnostics():
             started = time.time()
 
             try:
+
                 response = await client.get(
                     f"{PYTH_API_URL}{path}",
                     params=(
@@ -226,15 +312,9 @@ async def pyth_diagnostics():
 
             except httpx.RequestError as error:
 
-                logger.exception(
-                    "Pyth diagnostic failed: %s",
-                    name
-                )
-
                 results[name] = {
                     "connected": False,
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:250]
+                    "error_type": type(error).__name__
                 }
 
     return {
@@ -244,39 +324,36 @@ async def pyth_diagnostics():
     }
 
 
-# --------------------------------------------------
-# PYTH SYMBOL SEARCH
-# --------------------------------------------------
+# ==================================================
+# GOLD SYMBOL SEARCH
+# ==================================================
 
 @app.get("/api/market/symbols")
 async def market_symbols():
 
-    # Official symbols endpoint does not require authentication.
-    params = {
-        "query": "XAU",
-        "asset_type": "metal"
-    }
-
     response = await pyth_get(
         "/symbols",
-        params=params
+        params={
+            "query": "XAU",
+            "asset_type": "metal"
+        }
     )
 
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Pyth symbols request failed: HTTP {response.status_code}"
-        )
+        handle_pyth_error(response, "/symbols")
 
     try:
         data = response.json()
+
     except ValueError:
+
         raise HTTPException(
             status_code=502,
-            detail="Pyth returned invalid JSON"
+            detail="Invalid JSON received from Pyth"
         )
 
     if not isinstance(data, list):
+
         raise HTTPException(
             status_code=502,
             detail="Unexpected Pyth symbols response"
@@ -285,6 +362,7 @@ async def market_symbols():
     symbols = []
 
     for item in data:
+
         symbols.append({
             "symbol": item.get("symbol"),
             "name": item.get("name"),
@@ -303,22 +381,38 @@ async def market_symbols():
     }
 
 
-# --------------------------------------------------
-# PYTH HISTORICAL OHLC DATA
-# --------------------------------------------------
+# ==================================================
+# GOLD HISTORICAL OHLC DATA
+# ==================================================
 
 @app.get("/api/market/history")
 async def market_history(
-    symbol: str = Query(..., min_length=3, max_length=120),
+
+    symbol: str = Query(
+        GOLD_SYMBOL,
+        min_length=3,
+        max_length=120
+    ),
+
     resolution: str = Query("5"),
-    bars: int = Query(300, ge=50, le=500)
+
+    bars: int = Query(
+        100,
+        ge=50,
+        le=500
+    )
+
 ):
 
     if resolution not in RESOLUTIONS:
+
         raise HTTPException(
             status_code=400,
             detail="Unsupported chart resolution"
         )
+
+    # Use the verified Gold symbol by default.
+    # Other symbols are accepted only as explicit query inputs.
 
     headers = get_pyth_headers()
 
@@ -337,58 +431,47 @@ async def market_history(
         "resolution": resolution
     }
 
+    endpoint = f"/{PYTH_CHANNEL}/history"
+
     response = await pyth_get(
-        "/real_time/history",
+        endpoint,
         params=params,
         headers=headers,
         timeout=30
     )
 
-    if response.status_code == 401:
-        raise HTTPException(
-            status_code=401,
-            detail="Pyth API authentication failed"
-        )
-
-    if response.status_code == 403:
-        raise HTTPException(
-            status_code=403,
-            detail="Your Pyth API plan does not have access to this feed"
-        )
-
-    if response.status_code == 404:
-        raise HTTPException(
-            status_code=404,
-            detail="Gold symbol is unavailable on this channel"
-        )
-
-    if response.status_code == 429:
-        raise HTTPException(
-            status_code=429,
-            detail="Pyth API rate limit reached. Try again later"
-        )
-
     if response.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Pyth history request failed: HTTP {response.status_code}"
-        )
+        handle_pyth_error(response, endpoint)
 
     try:
+
         data = response.json()
+
     except ValueError:
+
         raise HTTPException(
             status_code=502,
-            detail="Pyth returned invalid history JSON"
+            detail="Invalid historical data JSON from Pyth"
+        )
+
+    if not isinstance(data, dict):
+
+        raise HTTPException(
+            status_code=502,
+            detail="Unexpected historical data format"
         )
 
     if data.get("s") != "ok":
-        return {
-            "status": "no_data",
-            "provider": "Pyth",
-            "symbol": symbol,
-            "bars": []
-        }
+
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Pyth returned no valid OHLC history",
+                "provider_message": data.get("errmsg"),
+                "symbol": symbol,
+                "channel": PYTH_CHANNEL
+            }
+        )
 
     timestamps = data.get("t") or []
     opens = data.get("o") or []
@@ -405,6 +488,7 @@ async def market_history(
     ]
 
     if len(set(lengths)) != 1:
+
         raise HTTPException(
             status_code=502,
             detail="Pyth returned inconsistent candle data"
@@ -413,6 +497,7 @@ async def market_history(
     candles = []
 
     for index in range(len(timestamps)):
+
         candles.append({
             "time": int(timestamps[index]),
             "open": float(opens[index]),
@@ -425,6 +510,7 @@ async def market_history(
         "status": "success",
         "provider": "Pyth",
         "symbol": symbol,
+        "channel": PYTH_CHANNEL,
         "resolution": resolution,
         "count": len(candles),
         "bars": candles,
