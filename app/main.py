@@ -1,11 +1,25 @@
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+
 from app.database import engine
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+FRONTEND_DIR = BASE_DIR / "frontend"
 
 app = FastAPI(
     title="GOLD AI LAB",
     description="Read-only market data and research dashboard API",
-    version="1.1.0"
+    version="1.2.0"
+)
+
+app.mount(
+    "/static",
+    StaticFiles(directory=str(FRONTEND_DIR)),
+    name="static"
 )
 
 TABLES = [
@@ -17,13 +31,9 @@ TABLES = [
 ]
 
 
-@app.get("/")
-def home():
-    return {
-        "project": "GOLD AI LAB",
-        "status": "online",
-        "version": "1.1.0"
-    }
+@app.get("/", include_in_schema=False)
+def dashboard():
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 @app.get("/health")
