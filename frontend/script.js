@@ -10,11 +10,32 @@ const TABLE_NAMES = [
 
 let selectedResolution = "5";
 let selectedSymbol = "";
+
 let marketChart = null;
 let candleSeries = null;
 let marketRefreshTimer = null;
+let liveSocket = null;
+let resizeObserver = null;
+
+let currentBars = [];
+let oldestBarTime = null;
+let historicalLoading = false;
+let hasMoreHistory = true;
+let initialChartLoad = true;
+let reconnectTimer = null;
 
 const $ = (id) => document.getElementById(id);
+
+
+function getErrorMessage(detail, fallback) {
+    if (typeof detail === "string") return detail;
+
+    if (detail && typeof detail === "object") {
+        return detail.message || JSON.stringify(detail);
+    }
+
+    return fallback;
+}
 
 
 function updateClock() {
@@ -58,6 +79,13 @@ function addActivity(title, description) {
 }
 
 
+function setMarketStatus(text) {
+    if ($("market-status")) {
+        $("market-status").textContent = text;
+    }
+}
+
+
 async function checkHealth() {
     try {
         const response = await fetch(`${API_BASE}/health`);
@@ -67,25 +95,48 @@ async function checkHealth() {
             throw new Error("Backend health check failed");
         }
 
-        $("api-status").textContent = "Online";
-        $("database-status").textContent = data.database || "Unknown";
-        $("sidebar-status").textContent = "Connected";
+        if ($("api-status")) {
+            $("api-status").textContent = "Online";
+        }
 
-        $("sidebar-status-dot").style.background = "#35d69a";
+        if ($("database-status")) {
+            $("database-status").textContent =
+                data.database || "Unknown";
+        }
+
+        if ($("sidebar-status")) {
+            $("sidebar-status").textContent = "Connected";
+        }
+
+        if ($("sidebar-status-dot")) {
+            $("sidebar-status-dot").style.background = "#35d69a";
+        }
 
     } catch (error) {
-        $("api-status").textContent = "Offline";
-        $("database-status").textContent = "Unknown";
-        $("sidebar-status").textContent = "Disconnected";
+        if ($("api-status")) {
+            $("api-status").textContent = "Offline";
+        }
 
-        $("sidebar-status-dot").style.background = "#ff6b75";
+        if ($("database-status")) {
+            $("database-status").textContent = "Unknown";
+        }
+
+        if ($("sidebar-status")) {
+            $("sidebar-status").textContent = "Disconnected";
+        }
+
+        if ($("sidebar-status-dot")) {
+            $("sidebar-status-dot").style.background = "#ff6b75";
+        }
     }
 }
 
 
 async function loadDatabaseSummary() {
     try {
-        const response = await fetch(`${API_BASE}/database-summary`);
+        const response = await fetch(
+            `${API_BASE}/database-summary`
+        );
 
         if (!response.ok) {
             throw new Error("Database summary unavailable");
@@ -93,6 +144,8 @@ async function loadDatabaseSummary() {
 
         const data = await response.json();
         const tableBody = $("database-table-body");
+
+        if (!tableBody) return;
 
         tableBody.replaceChildren();
 
@@ -116,14 +169,25 @@ async function loadDatabaseSummary() {
             totalTables++;
         });
 
-        $("table-count").textContent = totalTables;
-        $("db-connection-label").textContent = "Connected";
+        if ($("table-count")) {
+            $("table-count").textContent = totalTables;
+        }
+
+        if ($("db-connection-label")) {
+            $("db-connection-label").textContent = "Connected";
+        }
 
     } catch (error) {
-        $("db-connection-label").textContent = "Unavailable";
+        if ($("db-connection-label")) {
+            $("db-connection-label").textContent = "Unavailable";
+        }
     }
 }
 
+
+// ==================================================
+// CHART INITIALIZATION
+// ==================================================
 
 function initializeChart() {
     const container = $("market-chart");
@@ -159,11 +223,27 @@ function initializeChart() {
         timeScale: {
             borderColor: "#26364d",
             timeVisible: true,
-            secondsVisible: false
+            secondsVisible: false,
+            rightOffset: 8,
+            barSpacing: 7,
+            minBarSpacing: 2
         },
 
         crosshair: {
             mode: LightweightCharts.CrosshairMode.Normal
+        },
+
+        handleScroll: {
+            mouseWheel: true,
+            pressedMouseMove: true,
+            horzTouchDrag: true,
+            vertTouchDrag: true
+        },
+
+        handleScale: {
+            mouseWheel: true,
+            pinch: true,
+            axisPressedMouseMove: true
         }
     });
 
@@ -176,20 +256,29 @@ function initializeChart() {
         wickDownColor: "#ff6b75"
     });
 
+    // Load older candles when the user scrolls to the left.
+    marketChart.timeScale().subscribeVisibleLogicalRangeChange(
+        handleVisibleRangeChange
+    );
+
     if (window.ResizeObserver) {
-        const observer = new ResizeObserver(() => {
-            if (marketChart) {
-                marketChart.applyOptions({
-                    width: container.clientWidth,
-                    height: container.clientHeight
-                });
-            }
+        resizeObserver = new ResizeObserver(() => {
+            if (!marketChart) return;
+
+            marketChart.applyOptions({
+                width: container.clientWidth,
+                height: container.clientHeight
+            });
         });
 
-        observer.observe(container);
+        resizeObserver.observe(container);
     }
 }
 
+
+// ==================================================
+// LOAD GOLD SYMBOLS
+// ==================================================
 
 async function loadGoldSymbols() {
     const select = $("market-symbol");
@@ -202,61 +291,77 @@ async function loadGoldSymbols() {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.detail || "Could not load Gold symbols");
+            throw new Error(
+                getErrorMessage(data.detail, "Could not load symbols")
+            );
         }
 
-        if (!data.symbols || data.symbols.length === 0) {
-            throw new Error("No accessible Gold feed was found");
+        const activeSymbols = (data.symbols || []).filter(
+            item => item.symbol && item.state === "stable"
+        );
+
+        if (!activeSymbols.length) {
+            throw new Error("No active Gold feed was found");
         }
 
-        select.replaceChildren();
+        if (select) {
+            select.replaceChildren();
 
-        data.symbols.forEach((item) => {
-            if (!item.symbol) return;
+            activeSymbols.forEach((item) => {
+                const option = document.createElement("option");
+                option.value = item.symbol;
+                option.textContent = item.name || item.symbol;
 
-            const option = document.createElement("option");
-            option.value = item.symbol;
-            option.textContent = item.name || item.symbol;
-
-            select.appendChild(option);
-        });
-
-        if (!select.options.length) {
-            throw new Error("No usable Gold symbol was returned");
+                select.appendChild(option);
+            });
         }
 
-        selectedSymbol = select.value;
+        selectedSymbol = select
+            ? select.value
+            : activeSymbols[0].symbol;
 
-        await loadMarketHistory();
+        await loadMarketHistory(true);
 
     } catch (error) {
-        select.replaceChildren();
+        if (select) {
+            select.replaceChildren();
 
-        const option = document.createElement("option");
-        option.textContent = "Gold feed unavailable";
-        option.value = "";
+            const option = document.createElement("option");
+            option.textContent = "Gold feed unavailable";
+            option.value = "";
 
-        select.appendChild(option);
+            select.appendChild(option);
+        }
 
-        $("market-status").textContent = "Feed unavailable";
-        $("chart-message").textContent = error.message;
+        setMarketStatus("Feed unavailable");
+
+        if ($("chart-message")) {
+            $("chart-message").textContent = error.message;
+        }
 
         addActivity("Market data error", error.message);
     }
 }
 
 
-async function loadMarketHistory() {
+// ==================================================
+// LOAD HISTORICAL CANDLES
+// ==================================================
+
+async function loadMarketHistory(connectStream = false) {
     if (!selectedSymbol) return;
 
-    $("market-status").textContent = "Updating...";
-    $("chart-message").textContent = "Loading candle data...";
+    setMarketStatus("Loading history...");
+
+    if ($("chart-message")) {
+        $("chart-message").textContent = "Loading historical candles...";
+    }
 
     try {
         const params = new URLSearchParams({
             symbol: selectedSymbol,
             resolution: selectedResolution,
-            bars: "300"
+            bars: "500"
         });
 
         const response = await fetch(
@@ -266,54 +371,405 @@ async function loadMarketHistory() {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.detail || "Market history request failed");
+            throw new Error(
+                getErrorMessage(data.detail, "Market history failed")
+            );
         }
 
         if (!data.bars || data.bars.length === 0) {
-            throw new Error("No candle data is available for this symbol");
+            throw new Error("No historical candles available");
         }
 
-        if (!candleSeries) {
+        if (!marketChart) {
             initializeChart();
         }
 
-        candleSeries.setData(data.bars);
+        currentBars = data.bars
+            .slice()
+            .sort((a, b) => a.time - b.time);
 
+        candleSeries.setData(currentBars);
+
+        oldestBarTime = currentBars[0].time;
+        hasMoreHistory = currentBars.length >= 500;
+
+        // Fit only when a new chart/timeframe is loaded.
         marketChart.timeScale().fitContent();
 
-        const latest = data.bars[data.bars.length - 1];
+        initialChartLoad = false;
 
-        $("market-price").textContent =
-            Number(latest.close).toFixed(2);
+        const latest = currentBars[currentBars.length - 1];
 
-        $("market-status").textContent = "Pyth data connected";
-        $("market-updated").textContent =
-            `Updated: ${new Date().toLocaleTimeString()}`;
+        if ($("market-price")) {
+            $("market-price").textContent =
+                Number(latest.close).toFixed(2);
+        }
 
-        $("market-source").textContent =
-            `Source: Pyth · ${data.symbol}`;
+        if ($("market-status")) {
+            $("market-status").textContent = "History loaded";
+        }
 
-        $("chart-message").textContent = "";
+        if ($("market-updated")) {
+            $("market-updated").textContent =
+                `History: ${currentBars.length} candles`;
+        }
+
+        if ($("market-source")) {
+            $("market-source").textContent =
+                `Source: Pyth · ${data.symbol}`;
+        }
+
+        if ($("chart-message")) {
+            $("chart-message").textContent = "";
+        }
 
         addActivity(
-            "Market chart updated",
-            `${data.symbol} · ${data.count} candles received`
+            "Historical chart loaded",
+            `${data.symbol} · ${currentBars.length} candles`
         );
 
+        if (connectStream) {
+            connectLiveStream();
+        }
+
     } catch (error) {
-        $("market-status").textContent = "Data unavailable";
-        $("chart-message").textContent = error.message;
+        setMarketStatus("Data unavailable");
+
+        if ($("chart-message")) {
+            $("chart-message").textContent = error.message;
+        }
 
         addActivity("Market chart error", error.message);
     }
 }
 
 
+// ==================================================
+// INFINITE HISTORICAL DATA
+// ==================================================
+
+async function loadOlderHistory() {
+    if (
+        historicalLoading ||
+        !hasMoreHistory ||
+        !oldestBarTime ||
+        !selectedSymbol ||
+        !candleSeries
+    ) {
+        return;
+    }
+
+    historicalLoading = true;
+
+    try {
+        const previousRange =
+            marketChart.timeScale().getVisibleLogicalRange();
+
+        const oldLength = currentBars.length;
+
+        const params = new URLSearchParams({
+            symbol: selectedSymbol,
+            resolution: selectedResolution,
+            bars: "500",
+            to: String(oldestBarTime - 1)
+        });
+
+        const response = await fetch(
+            `${API_BASE}/api/market/history?${params.toString()}`
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                getErrorMessage(data.detail, "Older history failed")
+            );
+        }
+
+        const olderBars = (data.bars || []).filter(
+            bar => bar.time < oldestBarTime
+        );
+
+        if (!olderBars.length) {
+            hasMoreHistory = false;
+            return;
+        }
+
+        const merged = [
+            ...olderBars,
+            ...currentBars
+        ];
+
+        // Remove any duplicate timestamps.
+        const unique = new Map();
+
+        merged.forEach(bar => {
+            unique.set(bar.time, bar);
+        });
+
+        currentBars = Array.from(unique.values())
+            .sort((a, b) => a.time - b.time);
+
+        candleSeries.setData(currentBars);
+
+        oldestBarTime = currentBars[0].time;
+
+        if (olderBars.length < 500) {
+            hasMoreHistory = false;
+        }
+
+        // Preserve the user's current visible position.
+        if (previousRange) {
+            const added = currentBars.length - oldLength;
+
+            marketChart.timeScale().setVisibleLogicalRange({
+                from: previousRange.from + added,
+                to: previousRange.to + added
+            });
+        }
+
+        if ($("market-updated")) {
+            $("market-updated").textContent =
+                `${currentBars.length} candles loaded`;
+        }
+
+    } catch (error) {
+        console.error("Older history error:", error);
+
+    } finally {
+        historicalLoading = false;
+    }
+}
+
+
+function handleVisibleRangeChange(range) {
+    if (!range || historicalLoading || !hasMoreHistory) {
+        return;
+    }
+
+    if (range.from < 15) {
+        loadOlderHistory();
+    }
+}
+
+
+// ==================================================
+// LIVE WEBSOCKET CONNECTION
+// ==================================================
+
+function closeLiveStream() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+
+    if (liveSocket) {
+        liveSocket.onclose = null;
+        liveSocket.onerror = null;
+        liveSocket.onmessage = null;
+
+        liveSocket.close();
+
+        liveSocket = null;
+    }
+}
+
+
+function connectLiveStream() {
+    if (!selectedSymbol) return;
+
+    closeLiveStream();
+
+    const protocol =
+        window.location.protocol === "https:"
+            ? "wss:"
+            : "ws:";
+
+    const url =
+        `${protocol}//${window.location.host}/ws/market` +
+        `?symbol=${encodeURIComponent(selectedSymbol)}`;
+
+    liveSocket = new WebSocket(url);
+
+    setMarketStatus("Connecting live feed...");
+
+    liveSocket.onopen = () => {
+        setMarketStatus("Live stream connected");
+
+        addActivity(
+            "Live stream connected",
+            `${selectedSymbol} · Pyth WebSocket`
+        );
+    };
+
+    liveSocket.onmessage = (event) => {
+        let message;
+
+        try {
+            message = JSON.parse(event.data);
+        } catch {
+            return;
+        }
+
+        if (message.type === "connection") {
+            if (message.status === "connected") {
+                setMarketStatus("Live · Pyth connected");
+            }
+
+            if (message.status === "reconnecting") {
+                setMarketStatus("Reconnecting...");
+            }
+
+            return;
+        }
+
+        if (message.type === "heartbeat") {
+            return;
+        }
+
+        if (message.type === "error") {
+            setMarketStatus("Stream error");
+
+            if ($("chart-message")) {
+                $("chart-message").textContent = message.message;
+            }
+
+            return;
+        }
+
+        if (message.type === "price") {
+            updateLiveCandle(message);
+        }
+    };
+
+    liveSocket.onerror = () => {
+        setMarketStatus("Live connection issue");
+    };
+
+    liveSocket.onclose = () => {
+        setMarketStatus("Live feed disconnected");
+
+        if (document.visibilityState !== "hidden") {
+            reconnectTimer = setTimeout(() => {
+                connectLiveStream();
+            }, 4000);
+        }
+    };
+}
+
+
+// ==================================================
+// LIVE CANDLE UPDATE
+// ==================================================
+
+function updateLiveCandle(message) {
+    if (!candleSeries || !currentBars.length) return;
+
+    const mantissa = Number(message.price);
+    const exponent = Number(message.exponent);
+
+    if (!Number.isFinite(mantissa) || !Number.isFinite(exponent)) {
+        return;
+    }
+
+    const price = mantissa * Math.pow(10, exponent);
+
+    if (!Number.isFinite(price) || price <= 0) {
+        return;
+    }
+
+    const timestampUs = Number(
+        message.feedUpdateTimestamp || message.timestampUs
+    );
+
+    if (!Number.isFinite(timestampUs) || timestampUs <= 0) {
+        return;
+    }
+
+    const timestampSeconds = Math.floor(timestampUs / 1000000);
+
+    const secondsPerCandle =
+        Number(selectedResolution) * 60;
+
+    const candleTime =
+        Math.floor(timestampSeconds / secondsPerCandle)
+        * secondsPerCandle;
+
+    const latest = currentBars[currentBars.length - 1];
+
+    let nextCandle;
+
+    if (candleTime < latest.time) {
+        // Ignore an older or delayed update.
+        return;
+    }
+
+    if (candleTime === latest.time) {
+        nextCandle = {
+            time: latest.time,
+            open: latest.open,
+            high: Math.max(latest.high, price),
+            low: Math.min(latest.low, price),
+            close: price
+        };
+
+        currentBars[currentBars.length - 1] = nextCandle;
+
+    } else {
+        nextCandle = {
+            time: candleTime,
+            open: latest.close,
+            high: Math.max(latest.close, price),
+            low: Math.min(latest.close, price),
+            close: price
+        };
+
+        currentBars.push(nextCandle);
+    }
+
+    // Update only the latest candle. Do not reset the chart.
+    candleSeries.update(nextCandle);
+
+    if ($("market-price")) {
+        $("market-price").textContent = price.toFixed(2);
+    }
+
+    if ($("market-status")) {
+        $("market-status").textContent = "Live · Pyth";
+    }
+
+    if ($("market-updated")) {
+        $("market-updated").textContent =
+            `Live: ${new Date(timestampSeconds * 1000).toLocaleTimeString()}`;
+    }
+
+    if ($("last-updated")) {
+        $("last-updated").textContent =
+            new Date().toLocaleTimeString();
+    }
+}
+
+
+// ==================================================
+// MARKET CONTROLS
+// ==================================================
+
 function setupMarketControls() {
-    $("market-symbol").addEventListener("change", async (event) => {
-        selectedSymbol = event.target.value;
-        await loadMarketHistory();
-    });
+    const symbolSelect = $("market-symbol");
+
+    if (symbolSelect) {
+        symbolSelect.addEventListener("change", async (event) => {
+            selectedSymbol = event.target.value;
+
+            closeLiveStream();
+
+            currentBars = [];
+            oldestBarTime = null;
+            hasMoreHistory = true;
+
+            await loadMarketHistory(true);
+        });
+    }
 
     document.querySelectorAll(".timeframe-btn").forEach((button) => {
         button.addEventListener("click", async () => {
@@ -325,11 +781,20 @@ function setupMarketControls() {
 
             selectedResolution = button.dataset.resolution;
 
-            await loadMarketHistory();
+            currentBars = [];
+            oldestBarTime = null;
+            hasMoreHistory = true;
+
+            // Keep the live connection; only reload the timeframe.
+            await loadMarketHistory(false);
         });
     });
 }
 
+
+// ==================================================
+// DASHBOARD REFRESH
+// ==================================================
 
 async function refreshDashboard() {
     await Promise.all([
@@ -337,28 +802,48 @@ async function refreshDashboard() {
         loadDatabaseSummary()
     ]);
 
-    $("last-updated").textContent =
-        new Date().toLocaleTimeString();
-
-    if (selectedSymbol) {
-        await loadMarketHistory();
+    if ($("last-updated")) {
+        $("last-updated").textContent =
+            new Date().toLocaleTimeString();
     }
+
+    // Do not reload historical candles here.
+    // The live WebSocket updates the chart continuously.
 }
 
 
-function startAutoRefresh() {
+function startDashboardRefresh() {
     if (marketRefreshTimer) {
         clearInterval(marketRefreshTimer);
     }
 
+    // Only refresh health and database status.
     marketRefreshTimer = setInterval(() => {
         refreshDashboard();
     }, 30000);
 }
 
 
+// ==================================================
+// PAGE VISIBILITY
+// ==================================================
+
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+        if (!liveSocket || liveSocket.readyState === WebSocket.CLOSED) {
+            connectLiveStream();
+        }
+    }
+});
+
+
+// ==================================================
+// INITIALIZATION
+// ==================================================
+
 async function initializeDashboard() {
     updateClock();
+
     setInterval(updateClock, 1000);
 
     setupMarketControls();
@@ -367,13 +852,25 @@ async function initializeDashboard() {
     await loadDatabaseSummary();
     await loadGoldSymbols();
 
-    $("last-updated").textContent =
-        new Date().toLocaleTimeString();
+    if ($("last-updated")) {
+        $("last-updated").textContent =
+            new Date().toLocaleTimeString();
+    }
 
-    $("refresh-button").addEventListener("click", refreshDashboard);
+    const refreshButton = $("refresh-button");
 
-    startAutoRefresh();
+    if (refreshButton) {
+        refreshButton.addEventListener(
+            "click",
+            refreshDashboard
+        );
+    }
+
+    startDashboardRefresh();
 }
 
 
-document.addEventListener("DOMContentLoaded", initializeDashboard);
+document.addEventListener(
+    "DOMContentLoaded",
+    initializeDashboard
+);
