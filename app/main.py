@@ -60,7 +60,7 @@ TABLES = [
     "system_logs"
 ]
 
-RESOLUTIONS = {"1", "5", "15", "60", "240"}
+RESOLUTIONS = {"1", "5", "15", "30", "60", "240"}
 
 
 # ==================================================
@@ -135,8 +135,6 @@ def get_pyth_diagnostics():
         last_message = stats["last_message_at"]
         last_feed_timestamp = stats["last_feed_update_timestamp"]
 
-        # Pyth feedUpdateTimestamp is commonly expressed in seconds.
-        # Keep the raw value too; do not use it to timestamp chart candles.
         try:
             feed_age = (
                 round(now - float(last_feed_timestamp), 1)
@@ -435,6 +433,293 @@ async def market_history(
         "oldest_time": candles[0]["time"] if candles else None,
         "newest_time": candles[-1]["time"] if candles else None,
         "updated_at": int(time.time())
+    }
+
+
+# ==================================================
+# EDUCATIONAL MARKET INDICATORS
+# ==================================================
+
+ANALYSIS_RESOLUTIONS = {
+    "5": "M5",
+    "15": "M15",
+    "30": "M30",
+    "60": "H1",
+    "240": "H4",
+}
+
+
+def calculate_ema(values, period):
+    if len(values) < period:
+        return None
+    multiplier = 2 / (period + 1)
+    result = sum(values[:period]) / period
+    for value in values[period:]:
+        result = (value * multiplier) + (result * (1 - multiplier))
+    return result
+
+
+def calculate_rsi(values, period=14):
+    if len(values) <= period:
+        return None
+    changes = [values[i] - values[i - 1] for i in range(1, len(values))]
+    gains = [max(change, 0) for change in changes[-period:]]
+    losses = [max(-change, 0) for change in changes[-period:]]
+    average_gain = sum(gains) / period
+    average_loss = sum(losses) / period
+    if average_loss == 0:
+        return 100.0 if average_gain > 0 else 50.0
+    relative_strength = average_gain / average_loss
+    return 100 - (100 / (1 + relative_strength))
+
+
+def calculate_macd(values):
+    if len(values) < 35:
+        return None
+    macd_values = []
+    for index in range(25, len(values)):
+        fast = calculate_ema(values[:index + 1], 12)
+        slow = calculate_ema(values[:index + 1], 26)
+        if fast is not None and slow is not None:
+            macd_values.append(fast - slow)
+    if len(macd_values) < 9:
+        return None
+    signal = calculate_ema(macd_values, 9)
+    return {
+        "line": macd_values[-1],
+        "signal": signal,
+        "histogram": macd_values[-1] - signal,
+    }
+
+
+def calculate_bollinger(values, period=20):
+    if len(values) < period:
+        return None
+    window = values[-period:]
+    middle = sum(window) / period
+    variance = sum((value - middle) ** 2 for value in window) / period
+    deviation = variance ** 0.5
+    return {
+        "upper": middle + (2 * deviation),
+        "middle": middle,
+        "lower": middle - (2 * deviation),
+    }
+
+
+def calculate_atr(candles, period=14):
+    if len(candles) <= period:
+        return None
+    true_ranges = []
+    for index in range(1, len(candles)):
+        current = candles[index]
+        previous_close = candles[index - 1]["close"]
+        true_ranges.append(max(
+            current["high"] - current["low"],
+            abs(current["high"] - previous_close),
+            abs(current["low"] - previous_close),
+        ))
+    return sum(true_ranges[-period:]) / period
+
+
+def describe_candles(candles):
+    closes = [item["close"] for item in candles]
+    latest = candles[-1]
+    rsi = calculate_rsi(closes)
+    ema20 = calculate_ema(closes, 20)
+    ema50 = calculate_ema(closes, 50)
+    macd = calculate_macd(closes)
+    bands = calculate_bollinger(closes)
+    atr = calculate_atr(candles)
+    candle_range = max(latest["high"] - latest["low"], 0)
+    body = abs(latest["close"] - latest["open"])
+    body_ratio = (body / candle_range * 100) if candle_range else 0
+    average_range = (
+        sum(item["high"] - item["low"] for item in candles[-20:]) / min(20, len(candles))
+        if candles else 0
+    )
+
+    observations = []
+    if rsi is not None:
+        if rsi >= 70:
+            rsi_label = "উচ্চ RSI অঞ্চল"
+        elif rsi <= 30:
+            rsi_label = "নিম্ন RSI অঞ্চল"
+        else:
+            rsi_label = "মাঝামাঝি RSI অঞ্চল"
+        observations.append(
+            f"RSI(14) বর্তমানে {rsi_label}ে ({rsi:.1f}); এটি সাম্প্রতিক গড় gain ও loss-এর তুলনা দেখায়।"
+        )
+
+    if ema20 is not None:
+        relation = "উপরে" if latest["close"] >= ema20 else "নিচে"
+        observations.append(
+            f"শেষ candle close EMA20-এর {relation}ে; EMA20 সাম্প্রতিক ২০-period-এর weighted average বোঝায়।"
+        )
+    if ema50 is not None:
+        relation = "উপরে" if latest["close"] >= ema50 else "নিচে"
+        observations.append(
+            f"শেষ candle close EMA50-এর {relation}ে; এটি EMA20-এর তুলনায় দীর্ঘ window-এর গড়।"
+        )
+
+    macd_label = None
+    if macd:
+        relation = "উপরে" if macd["line"] >= macd["signal"] else "নিচে"
+        macd_label = f"MACD line signal line-এর {relation}ে"
+        observations.append(
+            f"{macd_label}; MACD হলো দুটি EMA-এর পার্থক্যভিত্তিক momentum পরিমাপ।"
+        )
+
+    band_position = None
+    if bands:
+        if latest["close"] > bands["upper"]:
+            band_position = "upper band-এর ওপরে"
+        elif latest["close"] < bands["lower"]:
+            band_position = "lower band-এর নিচে"
+        elif latest["close"] >= bands["middle"]:
+            band_position = "middle ও upper band-এর মধ্যে"
+        else:
+            band_position = "lower ও middle band-এর মধ্যে"
+        observations.append(
+            f"শেষ close Bollinger Bands-এর {band_position} অবস্থান করছে; band প্রস্থ volatility-এর ধারণা দেয়।"
+        )
+
+    volatility_label = "তথ্য অপর্যাপ্ত"
+    if atr is not None and average_range > 0:
+        ratio = atr / average_range
+        if ratio >= 1.5:
+            volatility_label = "সাম্প্রতিক candle range-এর তুলনায় ATR বেশি"
+        elif ratio <= 0.75:
+            volatility_label = "সাম্প্রতিক candle range-এর তুলনায় ATR কম"
+        else:
+            volatility_label = "ATR ও গড় candle range কাছাকাছি"
+
+    candle_label = (
+        "close open-এর উপরে" if latest["close"] > latest["open"]
+        else "close open-এর নিচে" if latest["close"] < latest["open"]
+        else "open ও close সমান"
+    )
+    observations.append(
+        f"সর্বশেষ candle-এ {candle_label}; body মোট high-low range-এর {body_ratio:.1f}%।"
+    )
+
+    return {
+        "candle_time": latest["time"],
+        "close": latest["close"],
+        "rsi14": round(rsi, 2) if rsi is not None else None,
+        "rsi_label": rsi_label if rsi is not None else "তথ্য অপর্যাপ্ত",
+        "ema20": round(ema20, 5) if ema20 is not None else None,
+        "ema50": round(ema50, 5) if ema50 is not None else None,
+        "macd": {
+            "line": round(macd["line"], 6),
+            "signal": round(macd["signal"], 6),
+            "histogram": round(macd["histogram"], 6),
+            "description": macd_label,
+        } if macd else None,
+        "bollinger": {
+            "upper": round(bands["upper"], 5),
+            "middle": round(bands["middle"], 5),
+            "lower": round(bands["lower"], 5),
+            "position": band_position,
+        } if bands else None,
+        "atr14": round(atr, 5) if atr is not None else None,
+        "volatility_description": volatility_label,
+        "candle_body_percent": round(body_ratio, 1),
+        "observations": observations,
+    }
+
+
+async def fetch_analysis_history(symbol, resolution, bars=160):
+    headers = get_pyth_headers()
+    end_time = int(time.time())
+    start_time = end_time - (int(resolution) * 60 * bars)
+    endpoint = f"/{PYTH_CHANNEL}/history"
+    response = await pyth_get(
+        endpoint,
+        params={
+            "symbol": symbol,
+            "from": start_time,
+            "to": end_time,
+            "resolution": resolution,
+        },
+        headers=headers,
+        timeout=30,
+    )
+    if response.status_code != 200:
+        handle_pyth_error(response, endpoint)
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Invalid analysis history JSON from Pyth")
+
+    if not isinstance(data, dict) or data.get("s") != "ok":
+        raise HTTPException(status_code=502, detail=f"Pyth returned no analysis candles for {ANALYSIS_RESOLUTIONS[resolution]}")
+
+    fields = [data.get(key) or [] for key in ("t", "o", "h", "l", "c")]
+    if len({len(field) for field in fields}) != 1:
+        raise HTTPException(status_code=502, detail="Pyth returned inconsistent analysis candles")
+
+    timestamps, opens, highs, lows, closes = fields
+    candles = [
+        {
+            "time": int(timestamps[index]),
+            "open": float(opens[index]),
+            "high": float(highs[index]),
+            "low": float(lows[index]),
+            "close": float(closes[index]),
+        }
+        for index in range(len(timestamps))
+    ]
+    candles.sort(key=lambda item: item["time"])
+    if len(candles) < 55:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Not enough historical candles for {ANALYSIS_RESOLUTIONS[resolution]} indicators",
+        )
+    return candles
+
+
+@app.get("/api/market/analysis")
+async def market_education_analysis(
+    symbol: str = Query(GOLD_SYMBOL, min_length=3, max_length=120),
+):
+    resolutions = list(ANALYSIS_RESOLUTIONS.keys())
+    results = await asyncio.gather(
+        *(fetch_analysis_history(symbol, resolution) for resolution in resolutions),
+        return_exceptions=True,
+    )
+
+    timeframes = []
+    for resolution, result in zip(resolutions, results):
+        label = ANALYSIS_RESOLUTIONS[resolution]
+        if isinstance(result, Exception):
+            detail = result.detail if isinstance(result, HTTPException) else str(result)
+            timeframes.append({
+                "resolution": resolution,
+                "label": label,
+                "available": False,
+                "error": str(detail),
+            })
+            continue
+
+        timeframes.append({
+            "resolution": resolution,
+            "label": label,
+            "available": True,
+            "bar_count": len(result),
+            "indicators": describe_candles(result),
+        })
+
+    available = sum(1 for item in timeframes if item["available"])
+    return {
+        "status": "success" if available else "unavailable",
+        "provider": "Pyth",
+        "symbol": symbol,
+        "mode": "descriptive_educational_only",
+        "generated_at": int(time.time()),
+        "available_timeframes": available,
+        "timeframes": timeframes,
+        "notice": "এটি বর্তমান ও ঐতিহাসিক ডেটার বর্ণনামূলক বিশ্লেষণ; ভবিষ্যৎ মূল্য, ট্রেডিং সিগন্যাল বা বিনিয়োগ নির্দেশনা দেয় না।",
     }
 
 
