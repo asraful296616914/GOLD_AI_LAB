@@ -21,11 +21,18 @@ let currentBars = [];
 let oldestBarTime = null;
 let historicalLoading = false;
 let hasMoreHistory = true;
-let initialChartLoad = true;
 let reconnectTimer = null;
+
+let isRestoringViewport = false;
+let historyRequestId = 0;
+let lastLiveUpdateTime = 0;
 
 const $ = (id) => document.getElementById(id);
 
+
+// ==================================================
+// GENERAL HELPERS
+// ==================================================
 
 function getErrorMessage(detail, fallback) {
     if (typeof detail === "string") return detail;
@@ -39,10 +46,9 @@ function getErrorMessage(detail, fallback) {
 
 
 function updateClock() {
-    const now = new Date();
-
     if ($("clock")) {
-        $("clock").textContent = now.toLocaleTimeString();
+        $("clock").textContent =
+            new Date().toLocaleTimeString();
     }
 }
 
@@ -86,9 +92,24 @@ function setMarketStatus(text) {
 }
 
 
+function setChartMessage(text) {
+    if ($("chart-message")) {
+        $("chart-message").textContent = text;
+    }
+}
+
+
+// ==================================================
+// HEALTH AND DATABASE
+// ==================================================
+
 async function checkHealth() {
     try {
-        const response = await fetch(`${API_BASE}/health`);
+        const response = await fetch(
+            `${API_BASE}/health`,
+            { cache: "no-store" }
+        );
+
         const data = await response.json();
 
         if (!response.ok) {
@@ -135,7 +156,8 @@ async function checkHealth() {
 async function loadDatabaseSummary() {
     try {
         const response = await fetch(
-            `${API_BASE}/database-summary`
+            `${API_BASE}/database-summary`,
+            { cache: "no-store" }
         );
 
         if (!response.ok) {
@@ -217,7 +239,13 @@ function initializeChart() {
         },
 
         rightPriceScale: {
-            borderColor: "#26364d"
+            visible: true,
+            borderColor: "#26364d",
+            autoScale: true,
+            scaleMargins: {
+                top: 0.10,
+                bottom: 0.10
+            }
         },
 
         timeScale: {
@@ -226,7 +254,8 @@ function initializeChart() {
             secondsVisible: false,
             rightOffset: 8,
             barSpacing: 7,
-            minBarSpacing: 2
+            minBarSpacing: 2,
+            shiftVisibleRangeOnNewBar: true
         },
 
         crosshair: {
@@ -253,10 +282,11 @@ function initializeChart() {
         borderUpColor: "#35d69a",
         borderDownColor: "#ff6b75",
         wickUpColor: "#35d69a",
-        wickDownColor: "#ff6b75"
+        wickDownColor: "#ff6b75",
+        priceLineVisible: true,
+        lastValueVisible: true
     });
 
-    // Load older candles when the user scrolls to the left.
     marketChart.timeScale().subscribeVisibleLogicalRangeChange(
         handleVisibleRangeChange
     );
@@ -285,14 +315,18 @@ async function loadGoldSymbols() {
 
     try {
         const response = await fetch(
-            `${API_BASE}/api/market/symbols`
+            `${API_BASE}/api/market/symbols`,
+            { cache: "no-store" }
         );
 
         const data = await response.json();
 
         if (!response.ok) {
             throw new Error(
-                getErrorMessage(data.detail, "Could not load symbols")
+                getErrorMessage(
+                    data.detail,
+                    "Could not load symbols"
+                )
             );
         }
 
@@ -334,10 +368,7 @@ async function loadGoldSymbols() {
         }
 
         setMarketStatus("Feed unavailable");
-
-        if ($("chart-message")) {
-            $("chart-message").textContent = error.message;
-        }
+        setChartMessage(error.message);
 
         addActivity("Market data error", error.message);
     }
@@ -345,17 +376,21 @@ async function loadGoldSymbols() {
 
 
 // ==================================================
-// LOAD HISTORICAL CANDLES
+// LOAD INITIAL HISTORICAL CANDLES
 // ==================================================
 
 async function loadMarketHistory(connectStream = false) {
     if (!selectedSymbol) return;
 
-    setMarketStatus("Loading history...");
+    const requestId = ++historyRequestId;
 
-    if ($("chart-message")) {
-        $("chart-message").textContent = "Loading historical candles...";
-    }
+    setMarketStatus("Loading history...");
+    setChartMessage("Loading historical candles...");
+
+    historicalLoading = false;
+    hasMoreHistory = true;
+    currentBars = [];
+    oldestBarTime = null;
 
     try {
         const params = new URLSearchParams({
@@ -365,16 +400,23 @@ async function loadMarketHistory(connectStream = false) {
         });
 
         const response = await fetch(
-            `${API_BASE}/api/market/history?${params.toString()}`
+            `${API_BASE}/api/market/history?${params.toString()}`,
+            { cache: "no-store" }
         );
 
         const data = await response.json();
 
         if (!response.ok) {
             throw new Error(
-                getErrorMessage(data.detail, "Market history failed")
+                getErrorMessage(
+                    data.detail,
+                    "Market history failed"
+                )
             );
         }
+
+        // Ignore an old request if the user changed timeframe.
+        if (requestId !== historyRequestId) return;
 
         if (!data.bars || data.bars.length === 0) {
             throw new Error("No historical candles available");
@@ -393,10 +435,8 @@ async function loadMarketHistory(connectStream = false) {
         oldestBarTime = currentBars[0].time;
         hasMoreHistory = currentBars.length >= 500;
 
-        // Fit only when a new chart/timeframe is loaded.
+        // Fit only on initial load or timeframe/symbol change.
         marketChart.timeScale().fitContent();
-
-        initialChartLoad = false;
 
         const latest = currentBars[currentBars.length - 1];
 
@@ -405,9 +445,8 @@ async function loadMarketHistory(connectStream = false) {
                 Number(latest.close).toFixed(2);
         }
 
-        if ($("market-status")) {
-            $("market-status").textContent = "History loaded";
-        }
+        setMarketStatus("History loaded");
+        setChartMessage("");
 
         if ($("market-updated")) {
             $("market-updated").textContent =
@@ -417,10 +456,6 @@ async function loadMarketHistory(connectStream = false) {
         if ($("market-source")) {
             $("market-source").textContent =
                 `Source: Pyth · ${data.symbol}`;
-        }
-
-        if ($("chart-message")) {
-            $("chart-message").textContent = "";
         }
 
         addActivity(
@@ -433,11 +468,10 @@ async function loadMarketHistory(connectStream = false) {
         }
 
     } catch (error) {
-        setMarketStatus("Data unavailable");
+        if (requestId !== historyRequestId) return;
 
-        if ($("chart-message")) {
-            $("chart-message").textContent = error.message;
-        }
+        setMarketStatus("Data unavailable");
+        setChartMessage(error.message);
 
         addActivity("Market chart error", error.message);
     }
@@ -445,7 +479,7 @@ async function loadMarketHistory(connectStream = false) {
 
 
 // ==================================================
-// INFINITE HISTORICAL DATA
+// LOAD OLDER HISTORICAL CANDLES
 // ==================================================
 
 async function loadOlderHistory() {
@@ -454,41 +488,58 @@ async function loadOlderHistory() {
         !hasMoreHistory ||
         !oldestBarTime ||
         !selectedSymbol ||
-        !candleSeries
+        !candleSeries ||
+        !marketChart
     ) {
         return;
     }
 
     historicalLoading = true;
 
+    const previousRange =
+        marketChart.timeScale().getVisibleLogicalRange();
+
+    const oldLength = currentBars.length;
+    const requestSymbol = selectedSymbol;
+    const requestResolution = selectedResolution;
+    const requestOldestTime = oldestBarTime;
+
     try {
-        const previousRange =
-            marketChart.timeScale().getVisibleLogicalRange();
-
-        const oldLength = currentBars.length;
-
         const params = new URLSearchParams({
-            symbol: selectedSymbol,
-            resolution: selectedResolution,
+            symbol: requestSymbol,
+            resolution: requestResolution,
             bars: "500",
-            to: String(oldestBarTime - 1)
+            to: String(requestOldestTime - 1)
         });
 
         const response = await fetch(
-            `${API_BASE}/api/market/history?${params.toString()}`
+            `${API_BASE}/api/market/history?${params.toString()}`,
+            { cache: "no-store" }
         );
 
         const data = await response.json();
 
         if (!response.ok) {
             throw new Error(
-                getErrorMessage(data.detail, "Older history failed")
+                getErrorMessage(
+                    data.detail,
+                    "Older history failed"
+                )
             );
         }
 
-        const olderBars = (data.bars || []).filter(
-            bar => bar.time < oldestBarTime
-        );
+        // Do not mix data from different symbols or timeframes.
+        if (
+            requestSymbol !== selectedSymbol ||
+            requestResolution !== selectedResolution ||
+            requestOldestTime !== oldestBarTime
+        ) {
+            return;
+        }
+
+        const olderBars = (data.bars || [])
+            .filter(bar => bar.time < oldestBarTime)
+            .sort((a, b) => a.time - b.time);
 
         if (!olderBars.length) {
             hasMoreHistory = false;
@@ -500,7 +551,6 @@ async function loadOlderHistory() {
             ...currentBars
         ];
 
-        // Remove any duplicate timestamps.
         const unique = new Map();
 
         merged.forEach(bar => {
@@ -510,6 +560,16 @@ async function loadOlderHistory() {
         currentBars = Array.from(unique.values())
             .sort((a, b) => a.time - b.time);
 
+        const added = currentBars.length - oldLength;
+
+        if (added <= 0) {
+            hasMoreHistory = false;
+            return;
+        }
+
+        // setData replaces the series, so restore the user's view.
+        isRestoringViewport = true;
+
         candleSeries.setData(currentBars);
 
         oldestBarTime = currentBars[0].time;
@@ -518,15 +578,16 @@ async function loadOlderHistory() {
             hasMoreHistory = false;
         }
 
-        // Preserve the user's current visible position.
         if (previousRange) {
-            const added = currentBars.length - oldLength;
-
             marketChart.timeScale().setVisibleLogicalRange({
                 from: previousRange.from + added,
                 to: previousRange.to + added
             });
         }
+
+        requestAnimationFrame(() => {
+            isRestoringViewport = false;
+        });
 
         if ($("market-updated")) {
             $("market-updated").textContent =
@@ -543,10 +604,16 @@ async function loadOlderHistory() {
 
 
 function handleVisibleRangeChange(range) {
-    if (!range || historicalLoading || !hasMoreHistory) {
+    if (
+        !range ||
+        historicalLoading ||
+        !hasMoreHistory ||
+        isRestoringViewport
+    ) {
         return;
     }
 
+    // Load more history when the chart approaches its left edge.
     if (range.from < 15) {
         loadOlderHistory();
     }
@@ -569,7 +636,6 @@ function closeLiveStream() {
         liveSocket.onmessage = null;
 
         liveSocket.close();
-
         liveSocket = null;
     }
 }
@@ -577,6 +643,16 @@ function closeLiveStream() {
 
 function connectLiveStream() {
     if (!selectedSymbol) return;
+
+    if (
+        liveSocket &&
+        (
+            liveSocket.readyState === WebSocket.OPEN ||
+            liveSocket.readyState === WebSocket.CONNECTING
+        )
+    ) {
+        return;
+    }
 
     closeLiveStream();
 
@@ -629,11 +705,7 @@ function connectLiveStream() {
 
         if (message.type === "error") {
             setMarketStatus("Stream error");
-
-            if ($("chart-message")) {
-                $("chart-message").textContent = message.message;
-            }
-
+            setChartMessage(message.message || "Live stream error");
             return;
         }
 
@@ -668,7 +740,10 @@ function updateLiveCandle(message) {
     const mantissa = Number(message.price);
     const exponent = Number(message.exponent);
 
-    if (!Number.isFinite(mantissa) || !Number.isFinite(exponent)) {
+    if (
+        !Number.isFinite(mantissa) ||
+        !Number.isFinite(exponent)
+    ) {
         return;
     }
 
@@ -678,9 +753,15 @@ function updateLiveCandle(message) {
         return;
     }
 
-    const timestampUs = Number(
-        message.feedUpdateTimestamp || message.timestampUs
-    );
+    // feedUpdateTimestamp is the feed's update time.
+    // timestampUs is the stream server timestamp fallback.
+    const feedTimestamp = Number(message.feedUpdateTimestamp);
+    const serverTimestamp = Number(message.timestampUs);
+
+    const timestampUs =
+        Number.isFinite(feedTimestamp) && feedTimestamp > 0
+            ? feedTimestamp
+            : serverTimestamp;
 
     if (!Number.isFinite(timestampUs) || timestampUs <= 0) {
         return;
@@ -697,12 +778,19 @@ function updateLiveCandle(message) {
 
     const latest = currentBars[currentBars.length - 1];
 
-    let nextCandle;
-
     if (candleTime < latest.time) {
-        // Ignore an older or delayed update.
+        // Ignore delayed updates older than the latest candle.
         return;
     }
+
+    // Detect whether the user is currently viewing the live edge.
+    const visibleRange =
+        marketChart.timeScale().getVisibleLogicalRange();
+
+    const wasFollowingLive = !visibleRange ||
+        visibleRange.to >= currentBars.length - 2;
+
+    let nextCandle;
 
     if (candleTime === latest.time) {
         nextCandle = {
@@ -727,16 +815,23 @@ function updateLiveCandle(message) {
         currentBars.push(nextCandle);
     }
 
-    // Update only the latest candle. Do not reset the chart.
+    // Update only the newest candle. Never reset the entire chart.
     candleSeries.update(nextCandle);
+
+    // If the user is browsing historical candles, preserve that view.
+    if (!wasFollowingLive && visibleRange) {
+        marketChart.timeScale().setVisibleLogicalRange(
+            visibleRange
+        );
+    }
+
+    lastLiveUpdateTime = Date.now();
 
     if ($("market-price")) {
         $("market-price").textContent = price.toFixed(2);
     }
 
-    if ($("market-status")) {
-        $("market-status").textContent = "Live · Pyth";
-    }
+    setMarketStatus("Live · Pyth");
 
     if ($("market-updated")) {
         $("market-updated").textContent =
@@ -763,29 +858,27 @@ function setupMarketControls() {
 
             closeLiveStream();
 
-            currentBars = [];
-            oldestBarTime = null;
-            hasMoreHistory = true;
-
             await loadMarketHistory(true);
         });
     }
 
     document.querySelectorAll(".timeframe-btn").forEach((button) => {
         button.addEventListener("click", async () => {
+            const nextResolution = button.dataset.resolution;
+
+            if (!nextResolution || nextResolution === selectedResolution) {
+                return;
+            }
+
             document.querySelectorAll(".timeframe-btn").forEach((item) => {
                 item.classList.remove("active");
             });
 
             button.classList.add("active");
 
-            selectedResolution = button.dataset.resolution;
+            selectedResolution = nextResolution;
 
-            currentBars = [];
-            oldestBarTime = null;
-            hasMoreHistory = true;
-
-            // Keep the live connection; only reload the timeframe.
+            // Load the selected timeframe without reconnecting the socket.
             await loadMarketHistory(false);
         });
     });
@@ -807,8 +900,9 @@ async function refreshDashboard() {
             new Date().toLocaleTimeString();
     }
 
-    // Do not reload historical candles here.
-    // The live WebSocket updates the chart continuously.
+    // Important:
+    // This function does not reload or reset the market chart.
+    // Live chart updates come only from the WebSocket.
 }
 
 
@@ -817,7 +911,7 @@ function startDashboardRefresh() {
         clearInterval(marketRefreshTimer);
     }
 
-    // Only refresh health and database status.
+    // Only health and database status refresh every 30 seconds.
     marketRefreshTimer = setInterval(() => {
         refreshDashboard();
     }, 30000);
@@ -830,7 +924,10 @@ function startDashboardRefresh() {
 
 document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
-        if (!liveSocket || liveSocket.readyState === WebSocket.CLOSED) {
+        if (
+            !liveSocket ||
+            liveSocket.readyState === WebSocket.CLOSED
+        ) {
             connectLiveStream();
         }
     }
