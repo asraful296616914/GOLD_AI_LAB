@@ -4,3 +4,4 @@ sqlalchemy
 psycopg[binary]
 python-dotenv
 httpx
+websockets>=14.0,<16.0
