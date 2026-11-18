@@ -29,7 +29,6 @@ let diagnosticsTimer = null;
 let lastLiveUpdateTime = 0;
 let lastHistoryError = "";
 
-
 const $ = (id) => document.getElementById(id);
 
 
@@ -269,6 +268,7 @@ async function loadGoldSymbols() {
 
         selectedSymbol = select ? select.value : activeSymbols[0].symbol;
         await loadMarketHistory(true);
+        await loadResearchAnalysis();
     } catch (error) {
         if (select) {
             select.replaceChildren();
@@ -807,6 +807,238 @@ function startPythDiagnostics() {
 
 
 // ==================================================
+// EDUCATIONAL MARKET RESEARCH
+// ==================================================
+
+let researchRequestId = 0;
+let researchHistory = [];
+
+function researchElement(tag, className, text) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined && text !== null) element.textContent = String(text);
+    return element;
+}
+
+function addResearchMetric(container, label, value, detail = "") {
+    const card = researchElement("div", "research-metric");
+    card.appendChild(researchElement("small", "", label));
+    card.appendChild(researchElement("strong", "", value ?? "N/A"));
+    if (detail) card.appendChild(researchElement("span", "", detail));
+    container.appendChild(card);
+}
+
+function renderResearchHistory() {
+    const container = $("research-history");
+    if (!container) return;
+
+    container.replaceChildren();
+    if ($("research-history-count")) {
+        $("research-history-count").textContent = researchHistory.length;
+    }
+
+    if (!researchHistory.length) {
+        container.appendChild(
+            researchElement("p", "research-empty", "এখনো কোনো analysis snapshot নেই।")
+        );
+        return;
+    }
+
+    researchHistory.forEach((item) => {
+        const row = researchElement("div", "research-history-item");
+        const info = researchElement("div");
+        info.appendChild(researchElement("strong", "", item.symbol));
+        info.appendChild(
+            researchElement("span", "", `${item.available}/5 timeframe পাওয়া গেছে`)
+        );
+        row.appendChild(info);
+        row.appendChild(
+            researchElement("time", "", new Date(item.time).toLocaleTimeString())
+        );
+        container.appendChild(row);
+    });
+}
+
+function renderResearchAnalysis(data) {
+    const container = $("research-timeframes");
+    if (!container) return;
+
+    container.replaceChildren();
+
+    (data.timeframes || []).forEach((timeframe) => {
+        const card = researchElement("article", "research-timeframe-card");
+        const head = researchElement("div", "research-timeframe-head");
+        const heading = researchElement("div");
+        heading.appendChild(researchElement("h3", "", timeframe.label));
+        heading.appendChild(
+            researchElement(
+                "div",
+                "research-snapshot-time",
+                timeframe.available
+                    ? `${timeframe.bar_count} historical candles`
+                    : "ডেটা পাওয়া যায়নি"
+            )
+        );
+        head.appendChild(heading);
+        head.appendChild(
+            researchElement(
+                "span",
+                "",
+                timeframe.available ? "DATA READY" : "UNAVAILABLE"
+            )
+        );
+        card.appendChild(head);
+
+        if (!timeframe.available || !timeframe.indicators) {
+            card.appendChild(
+                researchElement(
+                    "p",
+                    "research-error",
+                    timeframe.error || "এই timeframe-এর analysis তৈরি করা যায়নি।"
+                )
+            );
+            container.appendChild(card);
+            return;
+        }
+
+        const values = timeframe.indicators;
+        const metrics = researchElement("div", "research-metrics-grid");
+
+        addResearchMetric(
+            metrics,
+            "LATEST CLOSE",
+            Number(values.close).toFixed(2),
+            "সর্বশেষ সম্পন্ন/প্রাপ্ত candle-এর close"
+        );
+        addResearchMetric(
+            metrics,
+            "RSI (14)",
+            values.rsi14 === null ? "N/A" : values.rsi14,
+            values.rsi_label
+        );
+        addResearchMetric(
+            metrics,
+            "EMA 20",
+            values.ema20 === null ? "N/A" : Number(values.ema20).toFixed(3),
+            "২০-period weighted average"
+        );
+        addResearchMetric(
+            metrics,
+            "EMA 50",
+            values.ema50 === null ? "N/A" : Number(values.ema50).toFixed(3),
+            "৫০-period weighted average"
+        );
+        addResearchMetric(
+            metrics,
+            "MACD (12, 26, 9)",
+            values.macd ? Number(values.macd.line).toFixed(5) : "N/A",
+            values.macd ? values.macd.description : "পর্যাপ্ত candle নেই"
+        );
+        addResearchMetric(
+            metrics,
+            "BOLLINGER POSITION",
+            values.bollinger ? values.bollinger.position : "N/A",
+            values.bollinger
+                ? `Upper ${values.bollinger.upper.toFixed(2)} · Middle ${values.bollinger.middle.toFixed(2)} · Lower ${values.bollinger.lower.toFixed(2)}`
+                : "২০-period band"
+        );
+        addResearchMetric(
+            metrics,
+            "ATR (14)",
+            values.atr14 === null ? "N/A" : Number(values.atr14).toFixed(3),
+            values.volatility_description
+        );
+        addResearchMetric(
+            metrics,
+            "CANDLE BODY",
+            `${values.candle_body_percent}%`,
+            "সর্বশেষ candle-এর body / high-low range"
+        );
+
+        card.appendChild(metrics);
+
+        const observations = researchElement("ul", "research-observations");
+        (values.observations || []).forEach((observation) => {
+            observations.appendChild(researchElement("li", "", observation));
+        });
+        card.appendChild(observations);
+        container.appendChild(card);
+    });
+
+    const generatedAt = data.generated_at
+        ? new Date(data.generated_at * 1000).toLocaleString()
+        : new Date().toLocaleString();
+
+    if ($("research-status")) {
+        $("research-status").textContent =
+            `${data.available_timeframes || 0}/5 timeframe · ${generatedAt}`;
+    }
+
+    researchHistory.unshift({
+        symbol: data.symbol || selectedSymbol,
+        available: data.available_timeframes || 0,
+        time: Date.now(),
+    });
+    researchHistory = researchHistory.slice(0, 8);
+    renderResearchHistory();
+}
+
+async function loadResearchAnalysis() {
+    if (!selectedSymbol) return;
+
+    const requestId = ++researchRequestId;
+    const button = $("research-refresh");
+    if (button) {
+        button.disabled = true;
+        button.textContent = "Analyzing data...";
+    }
+    if ($("research-status")) $("research-status").textContent = "Pyth history সংগ্রহ করা হচ্ছে...";
+
+    try {
+        const params = new URLSearchParams({ symbol: selectedSymbol });
+        const response = await fetch(
+            `${API_BASE}/api/market/analysis?${params.toString()}`,
+            { cache: "no-store" }
+        );
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(getErrorMessage(data.detail, "Research analysis unavailable"));
+        }
+        if (requestId !== researchRequestId) return;
+
+        renderResearchAnalysis(data);
+        addActivity(
+            "Research snapshot updated",
+            `${data.available_timeframes || 0}/5 timeframe · ${selectedSymbol}`
+        );
+    } catch (error) {
+        if (requestId !== researchRequestId) return;
+        if ($("research-status")) $("research-status").textContent = "Analysis unavailable";
+        const container = $("research-timeframes");
+        if (container) {
+            container.replaceChildren(
+                researchElement("p", "research-error", error.message)
+            );
+        }
+    } finally {
+        if (requestId === researchRequestId && button) {
+            button.disabled = false;
+            button.textContent = "↻ Refresh analysis";
+        }
+    }
+}
+
+function setupResearchControls() {
+    const button = $("research-refresh");
+    if (button) {
+        button.addEventListener("click", loadResearchAnalysis);
+    }
+    renderResearchHistory();
+}
+
+
+// ==================================================
 // MARKET CONTROLS
 // ==================================================
 
@@ -818,6 +1050,7 @@ function setupMarketControls() {
             selectedSymbol = event.target.value;
             closeLiveStream();
             await loadMarketHistory(true);
+            await loadResearchAnalysis();
         });
     }
 
@@ -877,6 +1110,7 @@ async function initializeDashboard() {
     setInterval(updateClock, 1000);
 
     setupMarketControls();
+    setupResearchControls();
 
     await checkHealth();
     await loadDatabaseSummary();
