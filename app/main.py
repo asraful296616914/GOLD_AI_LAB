@@ -952,3 +952,17 @@ async def live_market(websocket: WebSocket):
             task.cancel()
         if workers:
             await asyncio.gather(*workers, return_exceptions=True)
+
+
+# ==================================================
+# AI RESEARCH + SIGNALS (Gemini)
+# ==================================================
+
+from app.signals import router as signals_router, start_background  # noqa: E402
+
+app.include_router(signals_router)
+
+
+@app.on_event("startup")
+async def start_ai_signals():
+    await start_background()
