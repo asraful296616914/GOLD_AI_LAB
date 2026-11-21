@@ -17,7 +17,7 @@ router = APIRouter()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
-AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "60")))
+AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "15")))
 MANUAL_GAP_SECONDS = 120
 EXPIRE_SECONDS = 24 * 3600
 MARKET_STALE_SECONDS = 4 * 3600
