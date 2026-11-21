@@ -66,7 +66,7 @@ async function load() {
     ]);
     $("status").textContent = "Gemini: " + (st.gemini_configured ? "চালু (" + st.model + ")" : "API Key নেই")
       + " · অটো: " + (st.auto ? "প্রতি " + st.interval_minutes + " মিনিট" : "বন্ধ")
-      + " · শেষ রান: " + fmtTime(st.last_run);
+      + " · শেষ রান: " + fmtTime(st.last_run) + (st.market_closed ? " · মার্কেট বন্ধ" : "");
     const r = rs.research;
     $("research").innerHTML = r
       ? '<span class="badge ' + esc(r.bias) + '">' + esc(r.bias) + '</span> <b>' + esc(r.confidence) + '%</b> <span class="muted">· ' + esc(r.model) + ' · ' + fmtTime(r.created_at) + '</span>'
@@ -92,6 +92,7 @@ $("run").addEventListener("click", async () => {
     const res = await getJSON("/api/ai/run", { method: "POST" });
     $("msg").textContent = res.status === "cooldown" ? "কিছুক্ষণ পরে আবার চেষ্টা করুন (" + res.wait_seconds + " সেকেন্ড)"
       : res.status === "busy" ? "আগের রান চলছে"
+      : res.status === "market_closed" ? "মার্কেট বন্ধ, নতুন সিগন্যাল তৈরি হয়নি (শেষ ক্যান্ডেল: " + fmtTime(res.last_candle) + ")"
       : "সম্পন্ন · নতুন সিগন্যাল: " + (res.created.length ? res.created.join(", ") : "নেই")
         + (res.gemini_error ? " · " + res.gemini_error : "");
     await load();
