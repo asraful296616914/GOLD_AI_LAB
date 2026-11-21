@@ -15,6 +15,7 @@ from app import smc
 from app import classic
 from app import classic2
 from app import filters
+from app import analyst
 from app import backtest
 
 logger = logging.getLogger("gold-ai-lab.signals")
@@ -278,6 +279,37 @@ async def resolve_open(m, symbol):
             )
 
 
+def signal_exists(row):
+    with engine.connect() as connection:
+        return connection.execute(
+            text(
+                "SELECT 1 FROM ai_signals WHERE strategy=:strategy AND direction=:direction "
+                "AND status='OPEN' AND created_at > :since LIMIT 1"
+            ),
+            {"strategy": row["strategy"], "direction": row["direction"], "since": row["created_at"] - 4 * 3600},
+        ).first() is not None
+
+
+async def publish(row, context):
+    if await asyncio.to_thread(signal_exists, row):
+        return False
+    if context and context.get("blackout"):
+        event = context["blackout"]
+        await analyst.log_review(row, "BLOCKED", 0, "বড় ইভেন্টের কাছাকাছি সময়: " + event["name"])
+        return False
+    verdict = await analyst.review(row, context) if context else None
+    if verdict:
+        if verdict["verdict"] != "APPROVE":
+            return False
+        row = {
+            **row, "confidence": verdict["confidence"],
+            "reason": (row.get("reason", "") + " | AI যাচাই: " + verdict["reason"])[:400],
+        }
+    else:
+        row = {**row, "reason": (row.get("reason", "") + " | (AI যাচাই হয়নি)")[:400]}
+    return await asyncio.to_thread(insert_signal, row)
+
+
 async def load_approved():
     if not QUALITY_GATE:
         return None
@@ -340,6 +372,10 @@ async def run_cycle(auto=False):
             if auto:
                 return {"status": "market_closed", "last_candle": h1[-1]["time"]}
             summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
+            closed_context = await analyst.build_context(m, h1, m.calculate_atr(h1), now, force=True, technical=summary_data)
+            summary_data["session"] = closed_context["session"]
+            if closed_context["brief"]:
+                summary_data["market_brief"] = analyst.brief_for_prompt(closed_context["brief"], now)
             gemini, gemini_error = await gemini_analyze(summary_data)
             if gemini:
                 await asyncio.to_thread(
@@ -360,6 +396,11 @@ async def run_cycle(auto=False):
 
         rule = rules_signal(m, h1)
         summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
+        STATE["reviews_used"] = 0
+        context = await analyst.build_context(m, h1, atr, now, force=not auto, technical=summary_data)
+        summary_data["session"] = context["session"]
+        if context["brief"]:
+            summary_data["market_brief"] = analyst.brief_for_prompt(context["brief"], now)
         gemini, gemini_error = await gemini_analyze(summary_data)
 
         if gemini:
@@ -400,8 +441,8 @@ async def run_cycle(auto=False):
                 "reason": "; ".join(rule["reasons"]),
             }, approved, flag_set)
             if rules_item:
-                added = await asyncio.to_thread(
-                    insert_signal, {"created_at": now, "symbol": symbol, "timeframe": "H1", **rules_item}
+                added = await publish(
+                    {"created_at": now, "symbol": symbol, "timeframe": "H1", **rules_item}, context
                 )
                 if added:
                     created.append("RULES_V1")
@@ -422,11 +463,11 @@ async def run_cycle(auto=False):
                 item = gate_item(raw_item, approved, flag_set)
                 if not item:
                     continue
-                added = await asyncio.to_thread(insert_signal, {
+                added = await publish({
                     "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
                     "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
-                })
+                }, context)
                 if added:
                     created.append(item["strategy"])
         except Exception:
@@ -437,11 +478,11 @@ async def run_cycle(auto=False):
                 item = gate_item(raw_item, approved, flag_set)
                 if not item:
                     continue
-                added = await asyncio.to_thread(insert_signal, {
+                added = await publish({
                     "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
                     "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
-                })
+                }, context)
                 if added:
                     created.append(item["strategy"])
         except Exception:
@@ -627,3 +668,13 @@ async def ai_smc_zones():
     SMC_CACHE["time"] = now
     SMC_CACHE["data"] = data
     return data
+
+
+@router.get("/api/ai/context")
+async def ai_context():
+    return analyst.public_context()
+
+
+@router.get("/api/ai/reviews")
+async def ai_reviews(limit: int = Query(15, ge=1, le=50)):
+    return {"reviews": await analyst.recent_reviews(limit)}
