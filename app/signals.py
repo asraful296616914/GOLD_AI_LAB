@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from app.database import engine
 from app import smc
+from app import smc
 
 logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
@@ -29,7 +30,7 @@ TF_LABEL = {"15": "M15", "60": "H1", "240": "H4"}
 PAPER_START_BALANCE = float(os.getenv("PAPER_START_BALANCE", "10000"))
 PAPER_RISK_PCT = float(os.getenv("PAPER_RISK_PCT", "1"))
 
-STATE = {"last_run": None, "last_error": None, "market_closed": False}
+STATE = {"last_run": None, "last_error": None, "market_closed": False, "zones": []}
 RUN_LOCK = asyncio.Lock()
 
 DDL = [
@@ -272,6 +273,12 @@ async def run_cycle(auto=False):
         await resolve_open(m, symbol)
 
         h1 = candles["60"]
+        zone_atr = m.calculate_atr(h1)
+        if zone_atr:
+            try:
+                STATE["zones"] = smc.all_zones(h1, zone_atr)
+            except Exception:
+                logger.exception("SMC zone detection failed")
         if now - h1[-1]["time"] > MARKET_STALE_SECONDS:
             STATE["market_closed"] = True
             return {"status": "market_closed", "last_candle": h1[-1]["time"]}
@@ -339,6 +346,23 @@ async def run_cycle(auto=False):
                     created.append(item["strategy"])
         except Exception:
             logger.exception("SMC analysis failed")
+
+        if atr:
+            try:
+                for name, setup in smc.detect_all(h1, atr).items():
+                    levels = smc.make_levels(setup["direction"], price, setup["sl"], atr)
+                    if not levels:
+                        continue
+                    sl, tp = levels
+                    added = await asyncio.to_thread(insert_signal, {
+                        "created_at": now, "strategy": name, "symbol": symbol, "timeframe": "H1",
+                        "direction": setup["direction"], "entry": price, "stop_loss": sl, "take_profit": tp,
+                        "confidence": setup["confidence"], "reason": setup["reason"][:400],
+                    })
+                    if added:
+                        created.append(name)
+            except Exception:
+                logger.exception("SMC signal generation failed")
 
         STATE["last_run"] = now
         STATE["last_error"] = gemini_error
@@ -516,3 +540,8 @@ async def ai_smc_zones():
     SMC_CACHE["time"] = now
     SMC_CACHE["data"] = data
     return data
+
+
+@router.get("/api/ai/zones")
+def ai_zones():
+    return {"zones": STATE["zones"], "market_closed": STATE["market_closed"]}
