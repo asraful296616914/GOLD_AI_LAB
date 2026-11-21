@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 
 from app.database import engine
+from app import smc
 
 logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
@@ -326,6 +327,19 @@ async def run_cycle(auto=False):
             if added:
                 created.append("GEMINI_V1")
 
+        try:
+            smc_result = smc.analyze(h1, atr, candles.get("240"))
+            for item in smc_result["signals"]:
+                added = await asyncio.to_thread(insert_signal, {
+                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
+                    "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
+                    "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
+                })
+                if added:
+                    created.append(item["strategy"])
+        except Exception:
+            logger.exception("SMC analysis failed")
+
         STATE["last_run"] = now
         STATE["last_error"] = gemini_error
         return {"status": "ok", "created": created, "gemini": bool(gemini), "gemini_error": gemini_error}
@@ -470,3 +484,35 @@ async def ai_paper():
         "by_strategy": by_strategy,
         "curve": curve,
     }
+
+
+SMC_CACHE = {"time": 0, "data": None}
+
+
+@router.get("/api/ai/smc/zones")
+async def ai_smc_zones():
+    now = time.time()
+    if SMC_CACHE["data"] and now - SMC_CACHE["time"] < 120:
+        return SMC_CACHE["data"]
+
+    from app import main as m
+
+    symbol = m.GOLD_SYMBOL
+    results = await asyncio.gather(
+        m.fetch_analysis_history(symbol, "60"),
+        m.fetch_analysis_history(symbol, "240"),
+        return_exceptions=True,
+    )
+    if isinstance(results[0], Exception):
+        raise HTTPException(status_code=502, detail="H1 ক্যান্ডেল পাওয়া যায়নি")
+    h1 = results[0]
+    h4 = None if isinstance(results[1], Exception) else results[1]
+    atr = m.calculate_atr(h1)
+    out = smc.analyze(h1, atr, h4)
+    data = {
+        "zones": out["zones"], "events": out["events"], "sweeps": out["sweeps"],
+        "context": out["context"], "generated_at": int(now),
+    }
+    SMC_CACHE["time"] = now
+    SMC_CACHE["data"] = data
+    return data
