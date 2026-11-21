@@ -1130,3 +1130,99 @@ async function initializeDashboard() {
 }
 
 document.addEventListener("DOMContentLoaded", initializeDashboard);
+
+
+// ==================================================
+// GEMINI AI RESEARCH CARD (AI Research Center)
+// ==================================================
+
+const AI_BASE = (typeof API_BASE === "string") ? API_BASE : "";
+
+function geminiEl(tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text !== undefined && text !== null) el.textContent = text;
+    return el;
+}
+
+async function loadGeminiResearch() {
+    const body = document.getElementById("ai-gemini-body");
+    const meta = document.getElementById("ai-gemini-meta");
+    if (!body) return;
+
+    try {
+        const [statusRes, researchRes] = await Promise.all([
+            fetch(`${AI_BASE}/api/ai/status`),
+            fetch(`${AI_BASE}/api/ai/research/latest`),
+        ]);
+        if (!statusRes.ok || !researchRes.ok) throw new Error("AI API unavailable");
+
+        const status = await statusRes.json();
+        const { research } = await researchRes.json();
+
+        if (meta) {
+            meta.textContent =
+                `Gemini: ${status.gemini_configured ? `on (${status.model})` : "no API key"}`
+                + ` · auto: ${status.auto ? `every ${status.interval_minutes} min` : "off"}`
+                + (status.market_closed ? " · market closed" : "");
+        }
+
+        body.replaceChildren();
+        if (!research) {
+            body.appendChild(geminiEl("p", "research-empty", "এখনো কোনো AI রিসার্চ নেই। 'Run Gemini AI' চাপুন।"));
+            return;
+        }
+
+        const colors = { BUY: "#22c55e", SELL: "#ef4444", NEUTRAL: "#8a96b0" };
+        const head = geminiEl("p", "", "");
+        const badge = geminiEl("strong", "", research.bias || "NEUTRAL");
+        badge.style.color = colors[research.bias] || colors.NEUTRAL;
+        head.appendChild(badge);
+        head.appendChild(document.createTextNode(
+            ` · ${research.confidence ?? 0}% · ${research.model} · ${new Date(research.created_at * 1000).toLocaleString()}`
+        ));
+        body.appendChild(head);
+        body.appendChild(geminiEl("p", "", research.summary || ""));
+        if (research.risk_note) {
+            body.appendChild(geminiEl("p", "research-empty", `⚠ ${research.risk_note}`));
+        }
+    } catch (error) {
+        body.replaceChildren(geminiEl("p", "research-error", error.message));
+    }
+}
+
+async function runGeminiResearch() {
+    const button = document.getElementById("ai-gemini-run");
+    const meta = document.getElementById("ai-gemini-meta");
+    if (button) { button.disabled = true; button.textContent = "Running..."; }
+
+    let message = "";
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/run`, { method: "POST" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const result = await response.json();
+        if (result.status === "cooldown") message = `wait ${result.wait_seconds}s`;
+        else if (result.status === "busy") message = "previous run in progress";
+        else if (result.status === "market_closed") message = "market closed, no new signal";
+        else message = result.gemini_error ? result.gemini_error : "done";
+    } catch (error) {
+        message = `failed: ${error.message}`;
+    }
+
+    await loadGeminiResearch();
+    if (meta && message) meta.textContent += ` · ${message}`;
+    if (button) { button.disabled = false; button.textContent = "▶ Run Gemini AI"; }
+}
+
+function setupGeminiResearch() {
+    const button = document.getElementById("ai-gemini-run");
+    if (button) button.addEventListener("click", runGeminiResearch);
+    loadGeminiResearch();
+    setInterval(loadGeminiResearch, 60000);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupGeminiResearch);
+} else {
+    setupGeminiResearch();
+}
