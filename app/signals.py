@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import asyncio
@@ -17,7 +18,11 @@ logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
 router.include_router(backtest.router)
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip()
+GEMINI_FALLBACKS = [
+    "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.6-flash",
+    "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+]
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
 AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "15")))
@@ -164,6 +169,14 @@ def rules_signal(m, candles):
     }
 
 
+def gemini_candidates():
+    names = []
+    for name in (STATE.get("gemini_model"), GEMINI_MODEL, *GEMINI_FALLBACKS):
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 async def gemini_analyze(summary):
     key = os.getenv("GEMINI_API_KEY")
     if not key:
@@ -182,32 +195,42 @@ async def gemini_analyze(summary):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json"},
     }
+    headers = {"x-goog-api-key": key.strip(), "Content-Type": "application/json"}
+    last_error = "কোনো Gemini মডেল পাওয়া যায়নি"
+
     try:
         async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                GEMINI_URL.format(model=GEMINI_MODEL),
-                headers={"x-goog-api-key": key.strip(), "Content-Type": "application/json"},
-                json=body,
-            )
-        if response.status_code == 429:
-            return None, "Gemini ফ্রি লিমিট শেষ (429), পরে আবার চেষ্টা হবে"
-        if response.status_code != 200:
-            return None, f"Gemini ত্রুটি {response.status_code}"
-        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(raw)
-        direction = str(parsed.get("direction", "NEUTRAL")).upper()
-        if direction not in ("BUY", "SELL", "NEUTRAL"):
-            direction = "NEUTRAL"
-        try:
-            confidence = max(0, min(100, int(parsed.get("confidence", 0))))
-        except (TypeError, ValueError):
-            confidence = 0
-        return {
-            "direction": direction,
-            "confidence": confidence,
-            "summary": str(parsed.get("summary_bn", ""))[:1200],
-            "risk_note": str(parsed.get("risk_note_bn", ""))[:600],
-        }, None
+            for model in gemini_candidates():
+                response = await client.post(GEMINI_URL.format(model=model), headers=headers, json=body)
+                if response.status_code == 404:
+                    last_error = f"{model}: মডেল পাওয়া যায়নি (404)"
+                    continue
+                if response.status_code == 429:
+                    last_error = f"{model}: ফ্রি লিমিট শেষ (429)"
+                    continue
+                if response.status_code != 200:
+                    return None, f"Gemini ত্রুটি {response.status_code} ({model})"
+
+                parts = response.json()["candidates"][0]["content"]["parts"]
+                raw = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+                raw = re.sub(r"^```(?:json)?|```$", "", raw).strip()
+                parsed = json.loads(raw)
+                direction = str(parsed.get("direction", "NEUTRAL")).upper()
+                if direction not in ("BUY", "SELL", "NEUTRAL"):
+                    direction = "NEUTRAL"
+                try:
+                    confidence = max(0, min(100, int(parsed.get("confidence", 0))))
+                except (TypeError, ValueError):
+                    confidence = 0
+                STATE["gemini_model"] = model
+                return {
+                    "direction": direction,
+                    "confidence": confidence,
+                    "summary": str(parsed.get("summary_bn", ""))[:1200],
+                    "risk_note": str(parsed.get("risk_note_bn", ""))[:600],
+                    "model": model,
+                }, None
+        return None, last_error
     except Exception as error:
         logger.exception("Gemini call failed")
         return None, f"Gemini কল ব্যর্থ: {type(error).__name__}"
@@ -276,7 +299,22 @@ async def run_cycle(auto=False):
         h1 = candles["60"]
         if now - h1[-1]["time"] > MARKET_STALE_SECONDS:
             STATE["market_closed"] = True
-            return {"status": "market_closed", "last_candle": h1[-1]["time"]}
+            if auto:
+                return {"status": "market_closed", "last_candle": h1[-1]["time"]}
+            summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
+            gemini, gemini_error = await gemini_analyze(summary_data)
+            if gemini:
+                await asyncio.to_thread(
+                    db_exec,
+                    "INSERT INTO ai_research (created_at, symbol, model, bias, confidence, summary, risk_note) "
+                    "VALUES (:created_at, :symbol, :model, :bias, :confidence, :summary, :risk_note)",
+                    {"created_at": now, "symbol": symbol, "model": gemini["model"], "bias": gemini["direction"],
+                     "confidence": gemini["confidence"], "summary": gemini["summary"], "risk_note": gemini["risk_note"]},
+                )
+            STATE["last_run"] = now
+            STATE["last_error"] = gemini_error
+            return {"status": "market_closed", "last_candle": h1[-1]["time"],
+                    "gemini": bool(gemini), "gemini_error": gemini_error}
         STATE["market_closed"] = False
         atr = m.calculate_atr(h1)
         price = h1[-1]["close"]
@@ -288,7 +326,7 @@ async def run_cycle(auto=False):
 
         if gemini:
             research = {
-                "model": GEMINI_MODEL,
+                "model": gemini["model"],
                 "bias": gemini["direction"],
                 "confidence": gemini["confidence"],
                 "summary": gemini["summary"],
@@ -377,7 +415,7 @@ def signals_page():
 def ai_status():
     return {
         "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
-        "model": GEMINI_MODEL,
+        "model": STATE.get("gemini_model") or GEMINI_MODEL or "auto",
         "auto": AI_AUTO,
         "interval_minutes": AI_INTERVAL_MIN,
         "last_run": STATE["last_run"],
