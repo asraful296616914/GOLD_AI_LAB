@@ -1226,3 +1226,136 @@ if (document.readyState === "loading") {
 } else {
     setupGeminiResearch();
 }
+
+
+// ==================================================
+// PAPER TRADES ON THE MAIN CHART
+// ==================================================
+
+let paperSeries = [];
+let paperPriceLines = [];
+let paperOverlayEnabled = true;
+
+function clearPaperOverlay() {
+    paperSeries.forEach((item) => {
+        try { marketChart.removeSeries(item); } catch (error) { /* already removed */ }
+    });
+    paperPriceLines.forEach((line) => {
+        try { candleSeries.removePriceLine(line); } catch (error) { /* already removed */ }
+    });
+    paperSeries = [];
+    paperPriceLines = [];
+    try { candleSeries.setMarkers([]); } catch (error) { /* no markers */ }
+}
+
+async function refreshPaperOverlay() {
+    if (!candleSeries || !marketChart) return;
+    if (!paperOverlayEnabled) { clearPaperOverlay(); return; }
+
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/signals?limit=12`, { cache: "no-store" });
+        if (!response.ok) return;
+        const { signals } = await response.json();
+
+        clearPaperOverlay();
+
+        const step = Number(selectedResolution) * 60;
+        const align = (time) => time - (time % step);
+        const lastBar = currentBars.length ? currentBars[currentBars.length - 1].time : null;
+        const markers = [];
+
+        signals.forEach((signal) => {
+            const isBuy = signal.direction === "BUY";
+            const isOpen = signal.status === "OPEN";
+            const startTime = align(signal.created_at);
+            let endTime = isOpen ? lastBar : align(signal.closed_at || signal.created_at);
+            if (endTime === null || endTime <= startTime) endTime = startTime + step;
+
+            const levels = [
+                [signal.entry, "#f5b942", "ENTRY"],
+                [signal.stop_loss, "#ef4444", "SL"],
+                [signal.take_profit, "#22c55e", "TP"],
+            ];
+
+            levels.forEach(([price, color, label]) => {
+                const line = marketChart.addLineSeries({
+                    color,
+                    lineWidth: 1,
+                    lineStyle: 2,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    crosshairMarkerVisible: false,
+                });
+                line.setData([
+                    { time: startTime, value: Number(price) },
+                    { time: endTime, value: Number(price) },
+                ]);
+                paperSeries.push(line);
+
+                if (isOpen) {
+                    paperPriceLines.push(candleSeries.createPriceLine({
+                        price: Number(price),
+                        color,
+                        lineVisible: false,
+                        axisLabelVisible: true,
+                        title: `${signal.strategy} ${label}`,
+                    }));
+                }
+            });
+
+            markers.push({
+                time: startTime,
+                position: isBuy ? "belowBar" : "aboveBar",
+                color: isBuy ? "#22c55e" : "#ef4444",
+                shape: isBuy ? "arrowUp" : "arrowDown",
+                text: `${signal.direction} ${signal.strategy}`,
+            });
+
+            if (!isOpen) {
+                const won = signal.status === "WIN";
+                const lost = signal.status === "LOSS";
+                markers.push({
+                    time: endTime,
+                    position: "inBar",
+                    color: won ? "#22c55e" : lost ? "#ef4444" : "#8a96b0",
+                    shape: "circle",
+                    text: signal.status,
+                });
+            }
+        });
+
+        markers.sort((a, b) => a.time - b.time);
+        candleSeries.setMarkers(markers);
+    } catch (error) {
+        console.warn("Paper overlay unavailable:", error);
+    }
+}
+
+function setupPaperOverlay() {
+    const container = document.getElementById("market-chart");
+    if (container && container.parentElement && !document.getElementById("paper-toggle")) {
+        const button = document.createElement("button");
+        button.id = "paper-toggle";
+        button.type = "button";
+        button.className = "research-refresh-btn";
+        button.style.margin = "0 0 8px";
+        button.textContent = "Paper trades: ON";
+        button.addEventListener("click", () => {
+            paperOverlayEnabled = !paperOverlayEnabled;
+            button.textContent = `Paper trades: ${paperOverlayEnabled ? "ON" : "OFF"}`;
+            refreshPaperOverlay();
+        });
+        container.parentElement.insertBefore(button, container);
+    }
+    document.querySelectorAll(".timeframe-btn").forEach((button) => {
+        button.addEventListener("click", () => setTimeout(refreshPaperOverlay, 2500));
+    });
+    setTimeout(refreshPaperOverlay, 4000);
+    setInterval(refreshPaperOverlay, 20000);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupPaperOverlay);
+} else {
+    setupPaperOverlay();
+}
