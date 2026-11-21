@@ -13,6 +13,8 @@ from sqlalchemy import text
 from app.database import engine
 from app import smc
 from app import classic
+from app import classic2
+from app import filters
 from app import backtest
 
 logger = logging.getLogger("gold-ai-lab.signals")
@@ -289,25 +291,25 @@ async def load_approved():
         if rows:
             result = json.loads(rows[0]["result"])
             strategies = result.get("strategies") or []
-            if strategies and "by_rr" in strategies[0]:
-                value = {name: float(rr) for name, rr in backtest.compute_approved(strategies).items()}
-            elif "approved" in result:
-                value = {name: float(rr) for name, rr in result["approved"].items()}
+            if strategies and "variants" in strategies[0]:
+                value = backtest.compute_approved(strategies)
     except Exception:
         logger.exception("Could not load approved strategies")
     STATE["approved_cache"] = (time.time(), value)
     return value
 
 
-def gate_item(item, approved):
+def gate_item(item, approved, flag_set):
     if approved is None:
         return item
-    rr = approved.get(item["strategy"])
-    if rr is None:
+    rule = approved.get(item["strategy"])
+    if not rule or flag_set is None:
+        return None
+    if not filters.passes(rule["filters"], flag_set, item["direction"]):
         return None
     risk = abs(item["entry"] - item["stop_loss"])
     direction = 1 if item["direction"] == "BUY" else -1
-    return {**item, "take_profit": item["entry"] + direction * rr * risk}
+    return {**item, "take_profit": item["entry"] + direction * rule["rr"] * risk}
 
 
 async def run_cycle(auto=False):
@@ -384,6 +386,11 @@ async def run_cycle(auto=False):
         )
 
         approved = await load_approved()
+        try:
+            flag_set = filters.flags(m, h1, candles.get("240"), atr, h1[-1]["time"]) if atr else None
+        except Exception:
+            logger.exception("Filter flags failed")
+            flag_set = None
 
         if rule and rule["direction"] in ("BUY", "SELL") and atr:
             sl, tp = build_levels(rule["direction"], price, atr)
@@ -391,7 +398,7 @@ async def run_cycle(auto=False):
                 "strategy": "RULES_V1", "direction": rule["direction"], "entry": price,
                 "stop_loss": sl, "take_profit": tp, "confidence": rule["confidence"],
                 "reason": "; ".join(rule["reasons"]),
-            }, approved)
+            }, approved, flag_set)
             if rules_item:
                 added = await asyncio.to_thread(
                     insert_signal, {"created_at": now, "symbol": symbol, "timeframe": "H1", **rules_item}
@@ -412,7 +419,7 @@ async def run_cycle(auto=False):
         try:
             smc_result = smc.analyze(h1, atr, candles.get("240"))
             for raw_item in smc_result["signals"]:
-                item = gate_item(raw_item, approved)
+                item = gate_item(raw_item, approved, flag_set)
                 if not item:
                     continue
                 added = await asyncio.to_thread(insert_signal, {
@@ -426,8 +433,8 @@ async def run_cycle(auto=False):
             logger.exception("SMC analysis failed")
 
         try:
-            for raw_item in classic.analyze(m, h1, atr):
-                item = gate_item(raw_item, approved)
+            for raw_item in [*classic.analyze(m, h1, atr), *classic2.analyze(m, h1, atr)]:
+                item = gate_item(raw_item, approved, flag_set)
                 if not item:
                     continue
                 added = await asyncio.to_thread(insert_signal, {
