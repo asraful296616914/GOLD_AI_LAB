@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#080d18">
+<title>GOLD AI LAB | AI Signals</title>
+<style>
+:root{--bg:#080d18;--card:#0f1626;--line:#1c2740;--text:#e6ebf5;--muted:#8a96b0;--gold:#f5b942;--green:#22c55e;--red:#ef4444;--gray:#64748b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Noto Sans Bengali",sans-serif;padding:16px;max-width:1100px;margin-inline:auto}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
+h1{font-size:20px;margin:0;color:var(--gold)}
+a{color:var(--gold);text-decoration:none}
+button{background:var(--gold);color:#111;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.5}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--muted);letter-spacing:.04em}
+.muted{color:var(--muted);font-size:13px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700}
+.BUY,.WIN{background:rgba(34,197,94,.15);color:var(--green)}
+.SELL,.LOSS{background:rgba(239,68,68,.15);color:var(--red)}
+.OPEN{background:rgba(245,185,66,.15);color:var(--gold)}
+.EXPIRED,.NEUTRAL{background:rgba(100,116,139,.2);color:var(--gray)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+.big{font-size:26px;font-weight:800}
+</style>
+</head>
+<body>
+<header>
+  <div><a href="/">← ড্যাশবোর্ড</a><h1>GOLD AI LAB · AI Signals</h1></div>
+  <div><button id="run">▶ এখনই AI চালাও</button></div>
+</header>
+<div class="muted" id="status">লোড হচ্ছে...</div>
+<div id="msg" class="muted" style="margin:6px 0 12px"></div>
+
+<div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
+<div class="card"><h2>স্ট্র্যাটেজির ফলাফল</h2><div id="stats" class="grid"></div></div>
+<div class="card"><h2>সিগন্যাল তালিকা</h2>
+  <div class="scroll"><table>
+    <thead><tr><th>সময়</th><th>স্ট্র্যাটেজি</th><th>দিক</th><th>এন্ট্রি</th><th>SL</th><th>TP</th><th>কনফিডেন্স</th><th>অবস্থা</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="8" class="muted">কোনো সিগন্যাল নেই</td></tr></tbody>
+  </table></div>
+</div>
+<p class="muted">এটি শিক্ষামূলক বিশ্লেষণ, বিনিয়োগ পরামর্শ নয়। সিগন্যাল লাভের নিশ্চয়তা দেয় না। আগে ডেমোতে যাচাই করুন।</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtTime = t => t ? new Date(t * 1000).toLocaleString("bn-BD") : "-";
+const num = v => Number(v).toFixed(2);
+async function getJSON(url, opt) {
+  const r = await fetch(url, opt);
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function load() {
+  try {
+    const [st, rs, sg, stats] = await Promise.all([
+      getJSON("/api/ai/status"), getJSON("/api/ai/research/latest"),
+      getJSON("/api/ai/signals?limit=50"), getJSON("/api/ai/stats")
+    ]);
+    $("status").textContent = "Gemini: " + (st.gemini_configured ? "চালু (" + st.model + ")" : "API Key নেই")
+      + " · অটো: " + (st.auto ? "প্রতি " + st.interval_minutes + " মিনিট" : "বন্ধ")
+      + " · শেষ রান: " + fmtTime(st.last_run);
+    const r = rs.research;
+    $("research").innerHTML = r
+      ? '<span class="badge ' + esc(r.bias) + '">' + esc(r.bias) + '</span> <b>' + esc(r.confidence) + '%</b> <span class="muted">· ' + esc(r.model) + ' · ' + fmtTime(r.created_at) + '</span>'
+        + '<p>' + esc(r.summary) + '</p>' + (r.risk_note ? '<p class="muted">⚠ ' + esc(r.risk_note) + '</p>' : "")
+      : "কোনো রিসার্চ নেই";
+    $("stats").innerHTML = stats.strategies.length ? stats.strategies.map(s =>
+      '<div><div class="muted">' + esc(s.strategy) + '</div><div class="big">' + (s.win_rate == null ? "-" : s.win_rate + "%") + '</div>'
+      + '<div class="muted">জয় ' + s.wins + ' · হার ' + s.losses + ' · চলমান ' + s.open + ' · মেয়াদোত্তীর্ণ ' + s.expired + '</div></div>'
+    ).join("") : '<div class="muted">এখনো কোনো ফলাফল নেই</div>';
+    $("rows").innerHTML = sg.signals.length ? sg.signals.map(s =>
+      '<tr><td>' + fmtTime(s.created_at) + '</td><td>' + esc(s.strategy) + '</td>'
+      + '<td><span class="badge ' + esc(s.direction) + '">' + esc(s.direction) + '</span></td>'
+      + '<td>' + num(s.entry) + '</td><td>' + num(s.stop_loss) + '</td><td>' + num(s.take_profit) + '</td>'
+      + '<td>' + esc(s.confidence) + '%</td><td><span class="badge ' + esc(s.status) + '">' + esc(s.status) + '</span></td></tr>'
+    ).join("") : '<tr><td colspan="8" class="muted">কোনো সিগন্যাল নেই</td></tr>';
+  } catch (e) {
+    $("status").textContent = "ডেটা লোড করা যায়নি: " + e.message;
+  }
+}
+$("run").addEventListener("click", async () => {
+  const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
+  try {
+    const res = await getJSON("/api/ai/run", { method: "POST" });
+    $("msg").textContent = res.status === "cooldown" ? "কিছুক্ষণ পরে আবার চেষ্টা করুন (" + res.wait_seconds + " সেকেন্ড)"
+      : res.status === "busy" ? "আগের রান চলছে"
+      : "সম্পন্ন · নতুন সিগন্যাল: " + (res.created.length ? res.created.join(", ") : "নেই")
+        + (res.gemini_error ? " · " + res.gemini_error : "");
+    await load();
+  } catch (e) { $("msg").textContent = "ব্যর্থ: " + e.message; }
+  b.disabled = false;
+});
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>
