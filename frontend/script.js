@@ -1488,3 +1488,151 @@ if (document.readyState === "loading") {
 } else {
     setupSmcOverlay();
 }
+
+
+// ==================================================
+// PAPER TRADING MONITOR (live P/L under the chart)
+// ==================================================
+
+let paperMonitorData = null;
+
+function paperMarketPrice() {
+    if (typeof currentBars === "undefined" || !currentBars.length) return null;
+    const price = Number(currentBars[currentBars.length - 1].close);
+    return Number.isFinite(price) ? price : null;
+}
+
+function paperMoney(value) {
+    const number = Number(value) || 0;
+    return `${number >= 0 ? "+" : "-"}$${Math.abs(number).toFixed(2)}`;
+}
+
+function paperColor(value) {
+    return Number(value) > 0 ? "#22c55e" : Number(value) < 0 ? "#ef4444" : "#8a96b0";
+}
+
+function paperCell(text, color, bold) {
+    const cell = document.createElement("td");
+    cell.textContent = text;
+    cell.style.cssText = "padding:7px 6px;border-bottom:1px solid rgba(138,150,176,.2);white-space:nowrap";
+    if (color) cell.style.color = color;
+    if (bold) cell.style.fontWeight = "700";
+    return cell;
+}
+
+function paperHeaderRow(labels) {
+    const row = document.createElement("tr");
+    labels.forEach((label) => {
+        const cell = document.createElement("th");
+        cell.textContent = label;
+        cell.style.cssText = "text-align:left;padding:7px 6px;color:#8a96b0;font-weight:600;white-space:nowrap";
+        row.appendChild(cell);
+    });
+    return row;
+}
+
+function paperTile(label, value, color) {
+    const tile = document.createElement("div");
+    const small = document.createElement("div");
+    small.textContent = label;
+    small.style.cssText = "font-size:12px;color:#8a96b0";
+    const big = document.createElement("div");
+    big.textContent = value;
+    big.style.cssText = "font-size:20px;font-weight:800";
+    if (color) big.style.color = color;
+    tile.appendChild(small);
+    tile.appendChild(big);
+    return tile;
+}
+
+function renderPaperMonitor() {
+    const summary = document.getElementById("paper-monitor-summary");
+    const table = document.getElementById("paper-monitor-table");
+    const sub = document.getElementById("paper-monitor-sub");
+    if (!summary || !table || !paperMonitorData) return;
+
+    const data = paperMonitorData;
+    const price = paperMarketPrice();
+    let floating = 0;
+
+    const openRows = data.open_trades.map((trade) => {
+        const direction = trade.direction === "BUY" ? 1 : -1;
+        const pnl = price === null ? null : (price - trade.entry) * direction * trade.units;
+        if (pnl !== null) floating += pnl;
+        return { trade, pnl };
+    });
+
+    sub.textContent = `Virtual balance $${Number(data.start_balance).toFixed(0)} · risk ${data.risk_pct}% per trade · not real money`
+        + (price === null ? "" : ` · price ${price.toFixed(2)}`);
+
+    summary.replaceChildren(
+        paperTile("Floating P/L (open)", price === null ? "--" : paperMoney(floating), paperColor(floating)),
+        paperTile("Realized P/L (closed)", paperMoney(data.net_pnl), paperColor(data.net_pnl)),
+        paperTile("Equity", `$${(Number(data.equity) + floating).toFixed(2)}`),
+        paperTile("Open / Closed", `${data.open_count} / ${data.closed_count}`),
+        paperTile("Win rate", data.win_rate === null ? "-" : `${data.win_rate}%`)
+    );
+
+    table.replaceChildren();
+
+    if (!openRows.length && !data.recent_closed.length) {
+        const row = document.createElement("tr");
+        const cell = paperCell("এখনো কোনো পেপার ট্রেড নেই। সিগন্যাল তৈরি হলে এখানে দেখাবে।", "#8a96b0");
+        row.appendChild(cell);
+        table.appendChild(row);
+        return;
+    }
+
+    if (openRows.length) {
+        table.appendChild(paperHeaderRow(["চলমান", "Strategy", "Entry", "SL", "TP", "Now", "P/L ($)", "R"]));
+        openRows.forEach(({ trade, pnl }) => {
+            const row = document.createElement("tr");
+            const isBuy = trade.direction === "BUY";
+            row.appendChild(paperCell(trade.direction, isBuy ? "#22c55e" : "#ef4444", true));
+            row.appendChild(paperCell(trade.strategy));
+            row.appendChild(paperCell(Number(trade.entry).toFixed(2)));
+            row.appendChild(paperCell(Number(trade.stop_loss).toFixed(2), "#ef4444"));
+            row.appendChild(paperCell(Number(trade.take_profit).toFixed(2), "#22c55e"));
+            row.appendChild(paperCell(price === null ? "--" : price.toFixed(2)));
+            row.appendChild(paperCell(pnl === null ? "--" : paperMoney(pnl), paperColor(pnl), true));
+            row.appendChild(paperCell(pnl === null ? "--" : `${(pnl / trade.risk_amount).toFixed(2)}R`, paperColor(pnl)));
+            table.appendChild(row);
+        });
+    }
+
+    if (data.recent_closed.length) {
+        table.appendChild(paperHeaderRow(["বন্ধ", "Strategy", "Result", "P/L ($)", "Closed", "", "", ""]));
+        data.recent_closed.forEach((trade) => {
+            const row = document.createElement("tr");
+            row.appendChild(paperCell(trade.direction, trade.direction === "BUY" ? "#22c55e" : "#ef4444", true));
+            row.appendChild(paperCell(trade.strategy));
+            row.appendChild(paperCell(trade.status, paperColor(trade.pnl)));
+            row.appendChild(paperCell(paperMoney(trade.pnl), paperColor(trade.pnl), true));
+            row.appendChild(paperCell(new Date(trade.closed_at * 1000).toLocaleString()));
+            table.appendChild(row);
+        });
+    }
+}
+
+async function loadPaperMonitor() {
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/paper`, { cache: "no-store" });
+        if (!response.ok) return;
+        paperMonitorData = await response.json();
+        renderPaperMonitor();
+    } catch (error) {
+        console.warn("Paper monitor unavailable:", error);
+    }
+}
+
+function setupPaperMonitor() {
+    loadPaperMonitor();
+    setInterval(loadPaperMonitor, 15000);
+    setInterval(renderPaperMonitor, 2000);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupPaperMonitor);
+} else {
+    setupPaperMonitor();
+}
