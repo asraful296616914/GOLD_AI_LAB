@@ -184,6 +184,7 @@ $("run").addEventListener("click", async () => {
     $("msg").textContent = res.status === "cooldown" ? "কিছুক্ষণ পরে আবার চেষ্টা করুন (" + res.wait_seconds + " সেকেন্ড)"
       : res.status === "busy" ? "আগের রান চলছে"
       : res.status === "market_closed" ? "মার্কেট বন্ধ, নতুন সিগন্যাল তৈরি হয়নি (শেষ ক্যান্ডেল: " + fmtTime(res.last_candle) + ")"
+        + (res.gemini ? " · AI রিসার্চ আপডেট হয়েছে" : res.gemini_error ? " · " + res.gemini_error : "")
       : "সম্পন্ন · নতুন সিগন্যাল: " + (res.created.length ? res.created.join(", ") : "নেই")
         + (res.gemini_error ? " · " + res.gemini_error : "");
     await load();
