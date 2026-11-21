@@ -39,6 +39,7 @@ th{color:var(--muted);font-weight:600}
 <div id="msg" class="muted" style="margin:6px 0 12px"></div>
 
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
+<div class="card"><h2>বাজারের পটভূমি (সেশন, খবর, ইকোনমিক ইভেন্ট)</h2><div id="ctx" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
 <div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
@@ -57,6 +58,9 @@ th{color:var(--muted);font-weight:600}
   <div class="muted" id="bt-note" style="margin-top:6px"></div>
 </div>
 <div class="card"><h2>স্ট্র্যাটেজির ফলাফল</h2><div id="stats" class="grid"></div></div>
+<div class="card"><h2>AI যাচাইয়ের লগ (সিগন্যাল প্রকাশের আগে চূড়ান্ত পরীক্ষা)</h2><div class="scroll"><table>
+  <thead><tr><th>সময়</th><th>স্ট্র্যাটেজি</th><th>দিক</th><th>রায়</th><th>কনফিডেন্স</th><th>কারণ</th></tr></thead>
+  <tbody id="rev-rows"><tr><td colspan="6" class="muted">এখনো কোনো যাচাই নেই</td></tr></tbody></table></div></div>
 <div class="card"><h2>সিগন্যাল তালিকা</h2>
   <div class="scroll"><table>
     <thead><tr><th>সময়</th><th>স্ট্র্যাটেজি</th><th>দিক</th><th>এন্ট্রি</th><th>SL</th><th>TP</th><th>কনফিডেন্স</th><th>অবস্থা</th></tr></thead>
@@ -77,6 +81,8 @@ async function getJSON(url, opt) {
 }
 async function load() {
   loadPaper();
+  loadContext();
+  loadReviews();
   loadSmc();
   try {
     const [st, rs, sg, stats] = await Promise.all([
@@ -207,6 +213,40 @@ $("bt-run").addEventListener("click", async () => {
 });
 $("bt-rr").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
 $("bt-filter").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
+async function loadContext() {
+  try {
+    const c = await getJSON("/api/ai/context");
+    const s = c.session || {};
+    const mins = v => v == null ? "-" : (v >= 60 ? Math.floor(v / 60) + " ঘণ্টা " + (v % 60) + " মিনিট" : v + " মিনিট");
+    let h = '<p><b>' + esc(s.text || "-") + '</b> <span class="muted">(UTC ' + esc(s.utc_hour) + ':00)</span></p>'
+      + '<p class="muted">পরের লন্ডন ওপেন: ' + mins(s.minutes_to_london_open) + ' · নিউ ইয়র্ক ওপেন: ' + mins(s.minutes_to_ny_open)
+      + (s.asian_range != null ? ' · এশিয়ান রেঞ্জ: $' + s.asian_range + ' (ATR-এর ' + s.asian_vs_atr + ' গুণ)' : '') + '</p>';
+    if (c.blackout) h += '<p style="color:#ef4444"><b>⚠ বড় ইভেন্টের কাছাকাছি সময়: ' + esc(c.blackout.name) + ' — নতুন সিগন্যাল বন্ধ</b></p>';
+    const b = c.brief;
+    if (b) {
+      const cls = { BULLISH: "BUY", BEARISH: "SELL", NEUTRAL: "NEUTRAL" }[b.sentiment] || "NEUTRAL";
+      h += '<p><span class="badge ' + cls + '">' + esc(b.sentiment) + '</span> <span class="muted">· ' + esc(b.model) + ' · ইন্টারনেট সার্চ: ' + (b.grounded ? "হ্যাঁ" : "না") + ' · ' + fmtTime(b.generated_at) + '</span></p>'
+        + '<p>' + esc(b.summary) + '</p>';
+      if (b.events.length) h += '<p><b>আসন্ন ইভেন্ট:</b><br>' + b.events.map(e => '• ' + fmtTime(e.time) + ' — ' + esc(e.name) + ' <span class="badge ' + (e.impact === "HIGH" ? "SELL" : "OPEN") + '">' + esc(e.impact) + '</span>').join("<br>") + '</p>';
+      if (b.headlines.length) h += '<p class="muted"><b>শিরোনাম:</b><br>' + b.headlines.map(x => '• ' + esc(x)).join("<br>") + '</p>';
+    } else {
+      h += '<p class="muted">খবর ও ইভেন্টের ব্রিফ এখনো আসেনি' + (c.brief_error ? ' (' + esc(c.brief_error) + ')' : '') + '। "এখনই AI চালাও" চাপুন।</p>';
+    }
+    $("ctx").innerHTML = h;
+  } catch (e) {
+    $("ctx").textContent = "লোড করা যায়নি";
+  }
+}
+async function loadReviews() {
+  try {
+    const d = await getJSON("/api/ai/reviews?limit=12");
+    const cls = { APPROVE: "WIN", REJECT: "LOSS", WAIT: "OPEN", BLOCKED: "LOSS" };
+    $("rev-rows").innerHTML = d.reviews.length ? d.reviews.map(r =>
+      '<tr><td>' + fmtTime(r.created_at) + '</td><td>' + esc(r.strategy) + '</td><td><span class="badge ' + esc(r.direction) + '">' + esc(r.direction) + '</span></td>'
+      + '<td><span class="badge ' + (cls[r.verdict] || "OPEN") + '">' + esc(r.verdict) + '</span></td><td>' + esc(r.confidence) + '%</td><td style="white-space:normal;min-width:220px">' + esc(r.reason) + '</td></tr>'
+    ).join("") : '<tr><td colspan="6" class="muted">এখনো কোনো যাচাই নেই</td></tr>';
+  } catch (e) {}
+}
 $("run").addEventListener("click", async () => {
   const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
   try {
