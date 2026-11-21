@@ -43,13 +43,17 @@ th{color:var(--muted);font-weight:600}
 <div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-    <button id="bt-run">▶ ব্যাকটেস্ট চালাও</button><select id="bt-days" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="180" selected>১৮০ দিন</option><option value="90">৯০ দিন</option></select><select id="bt-rr" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="1.0">টার্গেট ১:১</option><option value="1.5">টার্গেট ১:১.৫</option><option value="2.0" selected>টার্গেট ১:২</option></select><span class="muted" id="bt-status">লোড হচ্ছে...</span>
+    <button id="bt-run">▶ ব্যাকটেস্ট চালাও</button>
+    <select id="bt-days" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="180" selected>১৮০ দিন</option><option value="90">৯০ দিন</option></select>
+    <select id="bt-rr" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="2.0" selected>টার্গেট ১:২</option><option value="3.0">টার্গেট ১:৩</option></select>
+    <select id="bt-filter" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"></select>
+    <span class="muted" id="bt-status">লোড হচ্ছে...</span>
   </div>
   <div class="scroll"><table>
-    <thead><tr><th>স্ট্র্যাটেজি</th><th>ট্রেড</th><th>জয়ের হার</th><th>গড় R</th><th>PF</th><th>নেট R</th><th>ম্যাক্স DD (R)</th><th>সেশন ফিল্টার (ট্রেড / PF)</th><th>৫০%+ ও লাভজনক?</th><th>রায়</th></tr></thead>
+    <thead><tr><th>স্ট্র্যাটেজি</th><th>ট্রেড</th><th>জয়ের হার</th><th>গড় R</th><th>PF</th><th>নেট R</th><th>ম্যাক্স DD (R)</th><th>১ম অর্ধেক (ট্রেড / R)</th><th>২য় অর্ধেক (ট্রেড / R)</th><th>লক্ষ্য পূরণ?</th></tr></thead>
     <tbody id="bt-rows"><tr><td colspan="10" class="muted">এখনো চালানো হয়নি</td></tr></tbody>
   </table></div>
-  <div class="muted" style="margin-top:8px">রায়: "ভালো" = ৩০+ ট্রেড, গড় R > 0.1 ও PF ≥ 1.2। PF = মোট লাভ ÷ মোট ক্ষতি। সেশন ফিল্টার = শুধু সোম-শুক্র ০৭:০০-২০:০০ UTC।</div>
+  <div class="muted" style="margin-top:8px">লক্ষ্য পূরণ = ৩০+ ট্রেড, জয় ≥ ৫০%, গড় R > 0.1। PF = মোট লাভ ÷ মোট ক্ষতি। R = ঝুঁকির একক। অর্ধেক দুটো দেখায় ফল সময়ের সাথে টেকে কিনা।</div>
   <div class="muted" id="bt-note" style="margin-top:6px"></div>
 </div>
 <div class="card"><h2>স্ট্র্যাটেজির ফলাফল</h2><div id="stats" class="grid"></div></div>
@@ -145,26 +149,41 @@ async function loadSmc() {
 }
 let btTimer = null;
 const f1 = v => (v == null ? "-" : v);
+const fLabel = (ids, labels) => { const k = ids.length ? ids.join("+") : "NONE"; return labels[k] || k; };
 function renderBacktest(r) {
   window.btResult = r;
-  const rr = $("bt-rr").value;
-  const vcls = { PASS: "WIN", WEAK: "LOSS", FEW_TRADES: "EXPIRED" };
-  const vtext = { PASS: "ভালো", WEAK: "দুর্বল", FEW_TRADES: "ট্রেড কম" };
-  $("bt-rows").innerHTML = r.strategies.map(s => {
-    const x = (s.by_rr && s.by_rr[rr]) || { all: s.all, session: s.session, verdict: s.verdict };
-    const a = x.all, n = x.session;
-    const target = a.win_rate != null && a.win_rate >= 50 && a.expectancy_r > 0 && a.trades >= 30;
+  const sel = $("bt-filter");
+  if (!sel.options.length && r.filters) {
+    sel.innerHTML = r.filters.map(f => '<option value="' + esc(f.id) + '">' + esc(f.label) + '</option>').join("");
+    sel.value = "NONE";
+  }
+  const labels = {};
+  (r.filters || []).forEach(f => { labels[f.id] = f.label; });
+  if (!r.strategies.length || !r.strategies[0].variants) {
+    $("bt-rows").innerHTML = '<tr><td colspan="10" class="muted">পুরনো ফরম্যাটের ফল, নতুন ব্যাকটেস্ট চালান</td></tr>';
+    $("bt-note").textContent = "";
+    return;
+  }
+  const key = sel.value + "|" + $("bt-rr").value;
+  const rows = r.strategies.map(s => ({ s, v: s.variants[key] })).filter(x => x.v);
+  rows.sort((x, y) => (y.v.all.expectancy_r == null ? -9 : y.v.all.expectancy_r) - (x.v.all.expectancy_r == null ? -9 : x.v.all.expectancy_r));
+  const half = h => h.trades + ' / ' + f1(h.expectancy_r);
+  $("bt-rows").innerHTML = rows.map(({ s, v }) => {
+    const a = v.all;
+    const ok = a.win_rate != null && a.win_rate >= r.min_win && a.expectancy_r > 0.1 && a.trades >= 30;
     return '<tr><td>' + esc(s.strategy) + '</td><td>' + a.trades + '</td><td>' + (a.win_rate == null ? "-" : a.win_rate + "%") + '</td>'
       + '<td>' + f1(a.expectancy_r) + '</td><td>' + f1(a.profit_factor) + '</td><td>' + a.net_r + '</td><td>' + a.max_dd_r + '</td>'
-      + '<td>' + n.trades + ' / ' + f1(n.profit_factor) + '</td>'
-      + '<td>' + (target ? '<span class="badge WIN">✓ হ্যাঁ</span>' : '<span class="badge EXPIRED">না</span>') + '</td>'
-      + '<td><span class="badge ' + vcls[x.verdict] + '">' + vtext[x.verdict] + '</span></td></tr>';
+      + '<td>' + half(v.first) + '</td><td>' + half(v.second) + '</td>'
+      + '<td>' + (ok ? '<span class="badge WIN">✓ হ্যাঁ</span>' : '<span class="badge EXPIRED">না</span>') + '</td></tr>';
   }).join("");
-  const ap = r.approved ? Object.keys(r.approved) : null;
-  const apText = ap == null ? ""
-    : '<b>লাইভে অনুমোদিত (জয় ≥ ' + r.min_win + '%, লাভজনক): </b>'
-      + (ap.length ? ap.map(k => esc(k) + ' (১:' + r.approved[k] + ')').join(", ") : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে") + '<br>';
-  $("bt-note").innerHTML = apText + r.assumptions.map(x => "• " + esc(x)).join("<br>");
+  const ap = r.approved || {};
+  const names = Object.keys(ap);
+  const apText = '<b>লাইভে অনুমোদিত (জয় ≥ ' + r.min_win + '%, দুই অর্ধেকেই লাভজনক): </b>'
+    + (names.length ? names.map(k => esc(k) + ' (১:' + ap[k].rr + ', ' + esc(fLabel(ap[k].filters, labels)) + ', জয় ' + ap[k].win_rate + '%, ' + ap[k].trades + ' ট্রেড)').join("; ")
+      : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে") + '<br>';
+  const cl = (r.closest || []).map(c => esc(c.strategy) + ' (১:' + c.rr + ', ' + esc(fLabel(c.filters, labels)) + ': জয় ' + c.win_rate + '%, ' + c.trades + ' ট্রেড, গড় R ' + c.expectancy_r + ')');
+  const clText = cl.length ? '<b>সবচেয়ে বেশি জয়ের হার (লাভজনক সংযোগের মধ্যে): </b>' + cl.join("; ") + '<br>' : "";
+  $("bt-note").innerHTML = apText + clText + r.assumptions.map(x => "• " + esc(x)).join("<br>");
 }
 async function loadBacktest() {
   clearTimeout(btTimer);
@@ -182,11 +201,12 @@ async function loadBacktest() {
     $("bt-status").textContent = "লোড করা যায়নি";
   }
 }
-$("bt-rr").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
 $("bt-run").addEventListener("click", async () => {
   try { await getJSON("/api/ai/backtest/run?days=" + $("bt-days").value, { method: "POST" }); } catch (e) {}
   loadBacktest();
 });
+$("bt-rr").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
+$("bt-filter").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
 $("run").addEventListener("click", async () => {
   const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
   try {
