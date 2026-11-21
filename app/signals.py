@@ -434,6 +434,7 @@ async def ai_paper():
                 "id": s["id"], "strategy": s["strategy"], "direction": s["direction"],
                 "entry": s["entry"], "stop_loss": s["stop_loss"], "take_profit": s["take_profit"],
                 "created_at": s["created_at"], "risk_amount": round(risk_amount, 2),
+                "units": round(risk_amount / risk_unit, 4) if risk_unit else 0,
             })
             continue
         if s["status"] == "WIN":
@@ -444,7 +445,7 @@ async def ai_paper():
             pnl = 0.0
         closed.append({
             "id": s["id"], "strategy": s["strategy"], "direction": s["direction"],
-            "status": s["status"], "pnl": round(pnl, 2),
+            "status": s["status"], "pnl": round(pnl, 2), "entry": s["entry"],
             "closed_at": s["closed_at"] or s["created_at"],
         })
 
@@ -481,6 +482,7 @@ async def ai_paper():
         "closed_count": len(closed),
         "open_count": len(open_trades),
         "open_trades": open_trades,
+        "recent_closed": closed[-8:][::-1],
         "by_strategy": by_strategy,
         "curve": curve,
     }
