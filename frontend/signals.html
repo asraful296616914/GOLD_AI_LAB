@@ -39,6 +39,7 @@ th{color:var(--muted);font-weight:600}
 <div id="msg" class="muted" style="margin:6px 0 12px"></div>
 
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
+<div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
 <div class="card"><h2>স্ট্র্যাটেজির ফলাফল</h2><div id="stats" class="grid"></div></div>
 <div class="card"><h2>সিগন্যাল তালিকা</h2>
   <div class="scroll"><table>
@@ -59,6 +60,7 @@ async function getJSON(url, opt) {
   return r.json();
 }
 async function load() {
+  loadPaper();
   try {
     const [st, rs, sg, stats] = await Promise.all([
       getJSON("/api/ai/status"), getJSON("/api/ai/research/latest"),
@@ -84,6 +86,31 @@ async function load() {
     ).join("") : '<tr><td colspan="8" class="muted">কোনো সিগন্যাল নেই</td></tr>';
   } catch (e) {
     $("status").textContent = "ডেটা লোড করা যায়নি: " + e.message;
+  }
+}
+async function loadPaper() {
+  try {
+    const p = await getJSON("/api/ai/paper");
+    const sign = v => (Number(v) >= 0 ? "+" : "") + Number(v).toFixed(2);
+    const tile = (label, value) => '<div><div class="muted">' + label + '</div><div class="big">' + value + '</div></div>';
+    $("paper").innerHTML =
+      tile("ব্যালেন্স", "$" + Number(p.equity).toFixed(2))
+      + tile("নেট লাভ/ক্ষতি", sign(p.net_pnl))
+      + tile("রিটার্ন", sign(p.return_pct) + "%")
+      + tile("জয়ের হার", p.win_rate == null ? "-" : p.win_rate + "%")
+      + tile("সর্বোচ্চ ড্রডাউন", p.max_drawdown_pct + "%")
+      + tile("ট্রেড (বন্ধ / চলমান)", p.closed_count + " / " + p.open_count);
+    const c = p.curve || [];
+    if (c.length > 1) {
+      const vals = c.map(x => x.equity);
+      const min = Math.min(...vals), max = Math.max(...vals), span = (max - min) || 1;
+      const pts = c.map((x, i) => (i / (c.length - 1) * 600).toFixed(1) + "," + (75 - (x.equity - min) / span * 70).toFixed(1)).join(" ");
+      $("paper-curve").innerHTML = '<svg viewBox="0 0 600 80" preserveAspectRatio="none" style="width:100%;height:80px"><polyline fill="none" stroke="#f5b942" stroke-width="2" points="' + pts + '"/></svg>';
+    } else {
+      $("paper-curve").textContent = "";
+    }
+  } catch (e) {
+    $("paper").innerHTML = '<div class="muted">পেপার ট্রেডিং ডেটা লোড করা যায়নি</div>';
   }
 }
 $("run").addEventListener("click", async () => {
