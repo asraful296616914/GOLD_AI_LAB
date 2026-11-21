@@ -41,6 +41,17 @@ th{color:var(--muted);font-weight:600}
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
 <div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
+<div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+    <button id="bt-run">▶ ব্যাকটেস্ট চালাও (৯০ দিন)</button><span class="muted" id="bt-status">লোড হচ্ছে...</span>
+  </div>
+  <div class="scroll"><table>
+    <thead><tr><th>স্ট্র্যাটেজি</th><th>ট্রেড</th><th>জয়ের হার</th><th>গড় R</th><th>PF</th><th>নেট R</th><th>ম্যাক্স DD (R)</th><th>সেশন ফিল্টার (ট্রেড / PF)</th><th>রায়</th></tr></thead>
+    <tbody id="bt-rows"><tr><td colspan="9" class="muted">এখনো চালানো হয়নি</td></tr></tbody>
+  </table></div>
+  <div class="muted" style="margin-top:8px">রায়: "ভালো" = ৩০+ ট্রেড, গড় R > 0.1 ও PF ≥ 1.2। PF = মোট লাভ ÷ মোট ক্ষতি। সেশন ফিল্টার = শুধু সোম-শুক্র ০৭:০০-২০:০০ UTC।</div>
+  <div class="muted" id="bt-note" style="margin-top:6px"></div>
+</div>
 <div class="card"><h2>স্ট্র্যাটেজির ফলাফল</h2><div id="stats" class="grid"></div></div>
 <div class="card"><h2>সিগন্যাল তালিকা</h2>
   <div class="scroll"><table>
@@ -132,6 +143,40 @@ async function loadSmc() {
     $("smc").innerHTML = '<div class="muted">SMC ডেটা লোড করা যায়নি</div>';
   }
 }
+let btTimer = null;
+const f1 = v => (v == null ? "-" : v);
+function renderBacktest(r) {
+  const vcls = { PASS: "WIN", WEAK: "LOSS", FEW_TRADES: "EXPIRED" };
+  const vtext = { PASS: "ভালো", WEAK: "দুর্বল", FEW_TRADES: "ট্রেড কম" };
+  $("bt-rows").innerHTML = r.strategies.map(s => {
+    const a = s.all, n = s.session;
+    return '<tr><td>' + esc(s.strategy) + '</td><td>' + a.trades + '</td><td>' + (a.win_rate == null ? "-" : a.win_rate + "%") + '</td>'
+      + '<td>' + f1(a.expectancy_r) + '</td><td>' + f1(a.profit_factor) + '</td><td>' + a.net_r + '</td><td>' + a.max_dd_r + '</td>'
+      + '<td>' + n.trades + ' / ' + f1(n.profit_factor) + '</td>'
+      + '<td><span class="badge ' + vcls[s.verdict] + '">' + vtext[s.verdict] + '</span></td></tr>';
+  }).join("");
+  $("bt-note").innerHTML = r.assumptions.map(x => "• " + esc(x)).join("<br>");
+}
+async function loadBacktest() {
+  clearTimeout(btTimer);
+  try {
+    const d = await getJSON("/api/ai/backtest");
+    const running = d.status === "running";
+    $("bt-run").disabled = running;
+    $("bt-status").textContent = running ? "চলছে... " + d.progress + "%"
+      : d.status === "error" ? "ব্যর্থ: " + d.error
+      : d.result ? "সর্বশেষ রান: " + fmtTime(d.result.generated_at) + " · " + d.result.days + " দিন · " + d.result.h1_bars + "টি H1 ক্যান্ডেল"
+      : "এখনো চালানো হয়নি";
+    if (d.result) renderBacktest(d.result);
+    if (running) btTimer = setTimeout(loadBacktest, 3000);
+  } catch (e) {
+    $("bt-status").textContent = "লোড করা যায়নি";
+  }
+}
+$("bt-run").addEventListener("click", async () => {
+  try { await getJSON("/api/ai/backtest/run?days=90", { method: "POST" }); } catch (e) {}
+  loadBacktest();
+});
 $("run").addEventListener("click", async () => {
   const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
   try {
@@ -145,7 +190,7 @@ $("run").addEventListener("click", async () => {
   } catch (e) { $("msg").textContent = "ব্যর্থ: " + e.message; }
   b.disabled = false;
 });
-load(); setInterval(load, 30000);
+load(); loadBacktest(); setInterval(load, 30000);
 </script>
 </body>
 </html>
