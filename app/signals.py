@@ -20,12 +20,13 @@ AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
 AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "60")))
 MANUAL_GAP_SECONDS = 120
 EXPIRE_SECONDS = 24 * 3600
+MARKET_STALE_SECONDS = 4 * 3600
 SL_ATR = 1.5
 TP_ATR = 3.0
 TIMEFRAMES = ("15", "60", "240")
 TF_LABEL = {"15": "M15", "60": "H1", "240": "H4"}
 
-STATE = {"last_run": None, "last_error": None}
+STATE = {"last_run": None, "last_error": None, "market_closed": False}
 RUN_LOCK = asyncio.Lock()
 
 DDL = [
@@ -268,6 +269,10 @@ async def run_cycle(auto=False):
         await resolve_open(m, symbol)
 
         h1 = candles["60"]
+        if now - h1[-1]["time"] > MARKET_STALE_SECONDS:
+            STATE["market_closed"] = True
+            return {"status": "market_closed", "last_candle": h1[-1]["time"]}
+        STATE["market_closed"] = False
         atr = m.calculate_atr(h1)
         price = h1[-1]["close"]
         created = []
@@ -359,6 +364,7 @@ def ai_status():
         "interval_minutes": AI_INTERVAL_MIN,
         "last_run": STATE["last_run"],
         "last_error": STATE["last_error"],
+        "market_closed": STATE["market_closed"],
     }
 
 
