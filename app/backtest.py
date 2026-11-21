@@ -12,6 +12,7 @@ router = APIRouter()
 
 SPREAD = float(os.getenv("BACKTEST_SPREAD", "0.30"))
 MAX_HOLD_BARS = 48
+RR_LIST = (1.0, 1.5, 2.0)
 WINDOW = 160
 STRATEGY_ORDER = [
     "RULES_V1", "EMA_CROSS", "MACD_CROSS", "DONCHIAN", "SESSION_BREAKOUT", "RSI_REVERSAL",
@@ -80,8 +81,8 @@ def simulate(m, sg, smc, h1, h4, spread, progress=None):
     for i in range(50, n):
         bar = h1[i]
 
-        for name in list(open_trades):
-            t = open_trades[name]
+        for key in list(open_trades):
+            t = open_trades[key]
             direction = 1 if t["direction"] == "BUY" else -1
             if direction == 1:
                 hit_sl = bar["low"] <= t["stop_loss"]
@@ -94,16 +95,16 @@ def simulate(m, sg, smc, h1, h4, spread, progress=None):
             if hit_sl:
                 outcome, gross = "LOSS", -1.0
             elif hit_tp:
-                outcome, gross = "WIN", abs(t["take_profit"] - t["entry"]) / t["risk"]
+                outcome, gross = "WIN", t["rr"]
             elif i - t["opened_i"] >= MAX_HOLD_BARS:
                 outcome, gross = "EXPIRED", (bar["close"] - t["entry"]) * direction / t["risk"]
             if outcome:
                 trades.append({
-                    "strategy": name, "direction": t["direction"], "outcome": outcome,
+                    "strategy": t["strategy"], "rr": t["rr"], "direction": t["direction"], "outcome": outcome,
                     "r": round(gross - spread / t["risk"], 3),
                     "opened_at": t["opened_at"], "closed_at": bar["time"],
                 })
-                del open_trades[name]
+                del open_trades[key]
 
         window = h1[max(0, i - WINDOW + 1): i + 1]
         atr = m.calculate_atr(window)
@@ -131,12 +132,20 @@ def simulate(m, sg, smc, h1, h4, spread, progress=None):
             except Exception:
                 pass
             for item in candidates:
-                if item["strategy"] in open_trades:
-                    continue
                 risk = abs(item["entry"] - item["stop_loss"])
                 if risk <= 0:
                     continue
-                open_trades[item["strategy"]] = {**item, "opened_i": i, "opened_at": bar["time"], "risk": risk}
+                direction = 1 if item["direction"] == "BUY" else -1
+                for rr in RR_LIST:
+                    key = (item["strategy"], rr)
+                    if key in open_trades:
+                        continue
+                    open_trades[key] = {
+                        "strategy": item["strategy"], "direction": item["direction"],
+                        "entry": item["entry"], "stop_loss": item["stop_loss"],
+                        "take_profit": item["entry"] + direction * rr * risk,
+                        "rr": rr, "opened_i": i, "opened_at": bar["time"], "risk": risk,
+                    }
 
         if progress and i % 25 == 0:
             progress(i / n)
@@ -188,20 +197,28 @@ def build_result(trades, h1, h4, days):
     rows = []
     for name in STRATEGY_ORDER:
         own = [t for t in trades if t["strategy"] == name]
-        all_metrics = metrics(own)
+        by_rr = {}
+        for rr in RR_LIST:
+            sub = [t for t in own if t["rr"] == rr]
+            all_metrics = metrics(sub)
+            by_rr[str(rr)] = {
+                "all": all_metrics,
+                "session": metrics([t for t in sub if in_session(t["opened_at"])]),
+                "verdict": verdict(all_metrics),
+            }
+        base = by_rr["2.0"]
         rows.append({
-            "strategy": name,
-            "all": all_metrics,
-            "session": metrics([t for t in own if in_session(t["opened_at"])]),
-            "verdict": verdict(all_metrics),
+            "strategy": name, "all": base["all"], "session": base["session"],
+            "verdict": base["verdict"], "by_rr": by_rr,
         })
     return {
         "generated_at": int(time.time()), "days": days,
         "h1_bars": len(h1), "h4_bars": len(h4),
         "from": h1[0]["time"], "to": h1[-1]["time"],
-        "spread": SPREAD, "strategies": rows,
+        "spread": SPREAD, "rr_list": [str(rr) for rr in RR_LIST], "strategies": rows,
         "assumptions": [
             f"H1 ক্যান্ডেলে সিমুলেশন, স্প্রেড ${SPREAD:.2f} ধরা হয়েছে",
+            "টার্গেট = ঝুঁকির 1, 1.5 বা 2 গুণ (উপরের বাছাই অনুযায়ী); কম টার্গেটে জয়ের হার বাড়ে, কিন্তু প্রতি জয়ে লাভ কমে",
             "একই ক্যান্ডেলে SL ও TP দুটোই ছুঁলে লস ধরা হয়",
             f"{MAX_HOLD_BARS} ঘণ্টায় SL/TP না লাগলে বর্তমান দামে বন্ধ (মেয়াদোত্তীর্ণ)",
             "প্রতি স্ট্র্যাটেজিতে একসাথে একটাই ট্রেড; Gemini ব্যাকটেস্ট করা যায় না",
