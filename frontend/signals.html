@@ -160,7 +160,11 @@ function renderBacktest(r) {
       + '<td>' + (target ? '<span class="badge WIN">✓ হ্যাঁ</span>' : '<span class="badge EXPIRED">না</span>') + '</td>'
       + '<td><span class="badge ' + vcls[x.verdict] + '">' + vtext[x.verdict] + '</span></td></tr>';
   }).join("");
-  $("bt-note").innerHTML = r.assumptions.map(x => "• " + esc(x)).join("<br>");
+  const ap = r.approved ? Object.keys(r.approved) : null;
+  const apText = ap == null ? ""
+    : '<b>লাইভে অনুমোদিত (জয় ≥ ' + r.min_win + '%, লাভজনক): </b>'
+      + (ap.length ? ap.map(k => esc(k) + ' (১:' + r.approved[k] + ')').join(", ") : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে") + '<br>';
+  $("bt-note").innerHTML = apText + r.assumptions.map(x => "• " + esc(x)).join("<br>");
 }
 async function loadBacktest() {
   clearTimeout(btTimer);
