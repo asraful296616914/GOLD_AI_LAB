@@ -1,0 +1,396 @@
+import os
+import time
+import json
+import asyncio
+import logging
+
+import httpx
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
+from sqlalchemy import text
+
+from app.database import engine
+
+logger = logging.getLogger("gold-ai-lab.signals")
+router = APIRouter()
+
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
+AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "60")))
+MANUAL_GAP_SECONDS = 120
+EXPIRE_SECONDS = 24 * 3600
+SL_ATR = 1.5
+TP_ATR = 3.0
+TIMEFRAMES = ("15", "60", "240")
+TF_LABEL = {"15": "M15", "60": "H1", "240": "H4"}
+
+STATE = {"last_run": None, "last_error": None}
+RUN_LOCK = asyncio.Lock()
+
+DDL = [
+    """CREATE TABLE IF NOT EXISTS ai_signals (
+        id BIGSERIAL PRIMARY KEY,
+        created_at BIGINT NOT NULL,
+        strategy TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        entry DOUBLE PRECISION NOT NULL,
+        stop_loss DOUBLE PRECISION NOT NULL,
+        take_profit DOUBLE PRECISION NOT NULL,
+        confidence INTEGER NOT NULL DEFAULT 0,
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        closed_at BIGINT
+    )""",
+    """CREATE TABLE IF NOT EXISTS ai_research (
+        id BIGSERIAL PRIMARY KEY,
+        created_at BIGINT NOT NULL,
+        symbol TEXT NOT NULL,
+        model TEXT NOT NULL,
+        bias TEXT,
+        confidence INTEGER,
+        summary TEXT,
+        risk_note TEXT
+    )""",
+]
+
+
+def db_rows(sql, params=None):
+    with engine.connect() as connection:
+        return [dict(row._mapping) for row in connection.execute(text(sql), params or {})]
+
+
+def db_exec(sql, params=None):
+    with engine.begin() as connection:
+        connection.execute(text(sql), params or {})
+
+
+def ensure_tables():
+    with engine.begin() as connection:
+        for statement in DDL:
+            connection.execute(text(statement))
+
+
+def insert_signal(row):
+    with engine.begin() as connection:
+        duplicate = connection.execute(
+            text(
+                "SELECT 1 FROM ai_signals WHERE strategy=:strategy AND direction=:direction "
+                "AND status='OPEN' AND created_at > :since LIMIT 1"
+            ),
+            {"strategy": row["strategy"], "direction": row["direction"], "since": row["created_at"] - 4 * 3600},
+        ).first()
+        if duplicate:
+            return False
+        connection.execute(
+            text(
+                "INSERT INTO ai_signals (created_at, strategy, symbol, timeframe, direction, entry, "
+                "stop_loss, take_profit, confidence, reason) VALUES (:created_at, :strategy, :symbol, "
+                ":timeframe, :direction, :entry, :stop_loss, :take_profit, :confidence, :reason)"
+            ),
+            row,
+        )
+        return True
+
+
+def build_levels(direction, price, atr):
+    if direction == "BUY":
+        return price - SL_ATR * atr, price + TP_ATR * atr
+    return price + SL_ATR * atr, price - TP_ATR * atr
+
+
+def rules_signal(m, candles):
+    closes = [c["close"] for c in candles]
+    ema20 = m.calculate_ema(closes, 20)
+    ema50 = m.calculate_ema(closes, 50)
+    rsi = m.calculate_rsi(closes)
+    macd = m.calculate_macd(closes)
+    atr = m.calculate_atr(candles)
+    if None in (ema20, ema50, rsi, macd, atr):
+        return None
+    price = closes[-1]
+    score = 0
+    reasons = []
+
+    if ema20 > ema50:
+        score += 1
+        reasons.append("EMA20 > EMA50 (আপট্রেন্ড)")
+    else:
+        score -= 1
+        reasons.append("EMA20 < EMA50 (ডাউনট্রেন্ড)")
+
+    if price > ema20:
+        score += 1
+        reasons.append("প্রাইস EMA20-এর ওপরে")
+    else:
+        score -= 1
+        reasons.append("প্রাইস EMA20-এর নিচে")
+
+    if macd["histogram"] > 0:
+        score += 1
+        reasons.append("MACD হিস্টোগ্রাম পজিটিভ")
+    else:
+        score -= 1
+        reasons.append("MACD হিস্টোগ্রাম নেগেটিভ")
+
+    if rsi >= 70:
+        score -= 1
+        reasons.append(f"RSI {rsi:.0f} (ওভারবট)")
+    elif rsi <= 30:
+        score += 1
+        reasons.append(f"RSI {rsi:.0f} (ওভারসোল্ড)")
+    elif rsi > 50:
+        score += 1
+        reasons.append(f"RSI {rsi:.0f} (বুলিশ জোন)")
+    else:
+        score -= 1
+        reasons.append(f"RSI {rsi:.0f} (বেয়ারিশ জোন)")
+
+    direction = "BUY" if score >= 3 else "SELL" if score <= -3 else "NEUTRAL"
+    return {
+        "direction": direction,
+        "confidence": round(abs(score) / 4 * 100),
+        "reasons": reasons,
+        "price": price,
+        "atr": atr,
+    }
+
+
+async def gemini_analyze(summary):
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        return None, "GEMINI_API_KEY সেট করা নেই"
+
+    prompt = (
+        "You are a cautious market analyst for XAU/USD (gold). Use ONLY the indicator data below. "
+        "Do not invent prices, news or numbers. Return ONLY a JSON object with keys: "
+        "direction (BUY, SELL or NEUTRAL), confidence (integer 0-100), "
+        "summary_bn (3-4 short sentences in Bengali explaining the multi-timeframe picture), "
+        "risk_note_bn (1-2 sentences in Bengali about risks and uncertainty). "
+        "Prefer NEUTRAL when timeframes disagree. This is educational analysis, not financial advice.\n\n"
+        "DATA:\n" + json.dumps(summary, ensure_ascii=False)
+    )
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=45) as client:
+            response = await client.post(
+                GEMINI_URL.format(model=GEMINI_MODEL),
+                headers={"x-goog-api-key": key.strip(), "Content-Type": "application/json"},
+                json=body,
+            )
+        if response.status_code == 429:
+            return None, "Gemini ফ্রি লিমিট শেষ (429), পরে আবার চেষ্টা হবে"
+        if response.status_code != 200:
+            return None, f"Gemini ত্রুটি {response.status_code}"
+        raw = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = json.loads(raw)
+        direction = str(parsed.get("direction", "NEUTRAL")).upper()
+        if direction not in ("BUY", "SELL", "NEUTRAL"):
+            direction = "NEUTRAL"
+        try:
+            confidence = max(0, min(100, int(parsed.get("confidence", 0))))
+        except (TypeError, ValueError):
+            confidence = 0
+        return {
+            "direction": direction,
+            "confidence": confidence,
+            "summary": str(parsed.get("summary_bn", ""))[:1200],
+            "risk_note": str(parsed.get("risk_note_bn", ""))[:600],
+        }, None
+    except Exception as error:
+        logger.exception("Gemini call failed")
+        return None, f"Gemini কল ব্যর্থ: {type(error).__name__}"
+
+
+async def resolve_open(m, symbol):
+    open_rows = await asyncio.to_thread(db_rows, "SELECT * FROM ai_signals WHERE status='OPEN'")
+    if not open_rows:
+        return
+    try:
+        candles = await m.fetch_analysis_history(symbol, "5", bars=288)
+    except Exception:
+        logger.exception("Could not load M5 candles to resolve signals")
+        candles = []
+
+    now = int(time.time())
+    for signal in open_rows:
+        outcome = None
+        for candle in candles:
+            if candle["time"] <= signal["created_at"]:
+                continue
+            if signal["direction"] == "BUY":
+                hit_sl = candle["low"] <= signal["stop_loss"]
+                hit_tp = candle["high"] >= signal["take_profit"]
+            else:
+                hit_sl = candle["high"] >= signal["stop_loss"]
+                hit_tp = candle["low"] <= signal["take_profit"]
+            if hit_sl:
+                outcome = "LOSS"
+                break
+            if hit_tp:
+                outcome = "WIN"
+                break
+        if outcome is None and now - signal["created_at"] > EXPIRE_SECONDS:
+            outcome = "EXPIRED"
+        if outcome:
+            await asyncio.to_thread(
+                db_exec,
+                "UPDATE ai_signals SET status=:status, closed_at=:closed WHERE id=:id",
+                {"status": outcome, "closed": now, "id": signal["id"]},
+            )
+
+
+async def run_cycle(auto=False):
+    if RUN_LOCK.locked():
+        return {"status": "busy"}
+    async with RUN_LOCK:
+        now = int(time.time())
+        last = STATE["last_run"]
+        if not auto and last and now - last < MANUAL_GAP_SECONDS:
+            return {"status": "cooldown", "wait_seconds": MANUAL_GAP_SECONDS - (now - last)}
+
+        from app import main as m
+
+        symbol = m.GOLD_SYMBOL
+        results = await asyncio.gather(
+            *(m.fetch_analysis_history(symbol, tf) for tf in TIMEFRAMES),
+            return_exceptions=True,
+        )
+        candles = {tf: r for tf, r in zip(TIMEFRAMES, results) if not isinstance(r, Exception)}
+        if "60" not in candles:
+            raise HTTPException(status_code=502, detail="H1 ক্যান্ডেল পাওয়া যায়নি")
+
+        await resolve_open(m, symbol)
+
+        h1 = candles["60"]
+        atr = m.calculate_atr(h1)
+        price = h1[-1]["close"]
+        created = []
+
+        rule = rules_signal(m, h1)
+        summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
+        gemini, gemini_error = await gemini_analyze(summary_data)
+
+        if gemini:
+            research = {
+                "model": GEMINI_MODEL,
+                "bias": gemini["direction"],
+                "confidence": gemini["confidence"],
+                "summary": gemini["summary"],
+                "risk_note": gemini["risk_note"],
+            }
+        else:
+            research = {
+                "model": "rules-only",
+                "bias": rule["direction"] if rule else "NEUTRAL",
+                "confidence": rule["confidence"] if rule else 0,
+                "summary": "; ".join(rule["reasons"]) if rule else "পর্যাপ্ত ডেটা নেই",
+                "risk_note": gemini_error or "",
+            }
+        await asyncio.to_thread(
+            db_exec,
+            "INSERT INTO ai_research (created_at, symbol, model, bias, confidence, summary, risk_note) "
+            "VALUES (:created_at, :symbol, :model, :bias, :confidence, :summary, :risk_note)",
+            {"created_at": now, "symbol": symbol, **research},
+        )
+
+        if rule and rule["direction"] in ("BUY", "SELL") and atr:
+            sl, tp = build_levels(rule["direction"], price, atr)
+            added = await asyncio.to_thread(insert_signal, {
+                "created_at": now, "strategy": "RULES_V1", "symbol": symbol, "timeframe": "H1",
+                "direction": rule["direction"], "entry": price, "stop_loss": sl, "take_profit": tp,
+                "confidence": rule["confidence"], "reason": "; ".join(rule["reasons"]),
+            })
+            if added:
+                created.append("RULES_V1")
+
+        if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and atr:
+            sl, tp = build_levels(gemini["direction"], price, atr)
+            added = await asyncio.to_thread(insert_signal, {
+                "created_at": now, "strategy": "GEMINI_V1", "symbol": symbol, "timeframe": "H1",
+                "direction": gemini["direction"], "entry": price, "stop_loss": sl, "take_profit": tp,
+                "confidence": gemini["confidence"], "reason": gemini["summary"][:400],
+            })
+            if added:
+                created.append("GEMINI_V1")
+
+        STATE["last_run"] = now
+        STATE["last_error"] = gemini_error
+        return {"status": "ok", "created": created, "gemini": bool(gemini), "gemini_error": gemini_error}
+
+
+async def auto_loop():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await run_cycle(auto=True)
+        except Exception:
+            logger.exception("AI auto cycle failed")
+        await asyncio.sleep(AI_INTERVAL_MIN * 60)
+
+
+async def start_background():
+    try:
+        await asyncio.to_thread(ensure_tables)
+    except Exception:
+        logger.exception("Could not create AI tables")
+        return
+    if AI_AUTO:
+        asyncio.create_task(auto_loop())
+
+
+@router.get("/signals", include_in_schema=False)
+def signals_page():
+    from app import main as m
+    return FileResponse(m.FRONTEND_DIR / "signals.html")
+
+
+@router.get("/api/ai/status")
+def ai_status():
+    return {
+        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
+        "model": GEMINI_MODEL,
+        "auto": AI_AUTO,
+        "interval_minutes": AI_INTERVAL_MIN,
+        "last_run": STATE["last_run"],
+        "last_error": STATE["last_error"],
+    }
+
+
+@router.post("/api/ai/run")
+async def ai_run():
+    return await run_cycle()
+
+
+@router.get("/api/ai/signals")
+async def ai_signals(limit: int = Query(50, ge=1, le=200)):
+    rows = await asyncio.to_thread(db_rows, "SELECT * FROM ai_signals ORDER BY id DESC LIMIT :limit", {"limit": limit})
+    return {"signals": rows}
+
+
+@router.get("/api/ai/research/latest")
+async def ai_research_latest():
+    rows = await asyncio.to_thread(db_rows, "SELECT * FROM ai_research ORDER BY id DESC LIMIT 1")
+    return {"research": rows[0] if rows else None}
+
+
+@router.get("/api/ai/stats")
+async def ai_stats():
+    rows = await asyncio.to_thread(
+        db_rows,
+        "SELECT strategy, COUNT(*) AS total, "
+        "COUNT(*) FILTER (WHERE status='WIN') AS wins, "
+        "COUNT(*) FILTER (WHERE status='LOSS') AS losses, "
+        "COUNT(*) FILTER (WHERE status='EXPIRED') AS expired, "
+        "COUNT(*) FILTER (WHERE status='OPEN') AS open "
+        "FROM ai_signals GROUP BY strategy ORDER BY strategy",
+    )
+    for row in rows:
+        decided = row["wins"] + row["losses"]
+        row["win_rate"] = round(row["wins"] / decided * 100, 1) if decided else None
+    return {"strategies": rows}
