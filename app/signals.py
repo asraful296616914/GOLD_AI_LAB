@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.database import engine
 from app import smc
+from app import classic
 from app import backtest
 
 logger = logging.getLogger("gold-ai-lab.signals")
@@ -379,6 +380,18 @@ async def run_cycle(auto=False):
                     created.append(item["strategy"])
         except Exception:
             logger.exception("SMC analysis failed")
+
+        try:
+            for item in classic.analyze(m, h1, atr):
+                added = await asyncio.to_thread(insert_signal, {
+                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
+                    "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
+                    "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
+                })
+                if added:
+                    created.append(item["strategy"])
+        except Exception:
+            logger.exception("Classic strategies failed")
 
         STATE["last_run"] = now
         STATE["last_error"] = gemini_error
