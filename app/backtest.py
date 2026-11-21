@@ -13,7 +13,11 @@ router = APIRouter()
 SPREAD = float(os.getenv("BACKTEST_SPREAD", "0.30"))
 MAX_HOLD_BARS = 48
 WINDOW = 160
-STRATEGY_ORDER = ["RULES_V1", "SMC_STRUCTURE", "SMC_SWEEP", "SMC_OB", "SMC_FVG", "SMC_SD", "SMC_V1"]
+STRATEGY_ORDER = [
+    "RULES_V1", "EMA_CROSS", "MACD_CROSS", "DONCHIAN", "SESSION_BREAKOUT", "RSI_REVERSAL",
+    "BB_BOUNCE", "SR_CANDLE", "TREND_PULLBACK",
+    "SMC_STRUCTURE", "SMC_SWEEP", "SMC_OB", "SMC_FVG", "SMC_SD", "SMC_V1",
+]
 STATE = {"status": "idle", "progress": 0, "started_at": None, "error": None, "result": None}
 
 DDL = (
@@ -109,6 +113,11 @@ def simulate(m, sg, smc, h1, h4, spread, progress=None):
             candidates = []
             try:
                 candidates.extend(smc.analyze(window, atr, h4_window)["signals"])
+            except Exception:
+                pass
+            try:
+                from app import classic
+                candidates.extend(classic.analyze(m, window, atr))
             except Exception:
                 pass
             try:
