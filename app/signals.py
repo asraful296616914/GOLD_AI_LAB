@@ -11,9 +11,11 @@ from sqlalchemy import text
 
 from app.database import engine
 from app import smc
+from app import backtest
 
 logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
+router.include_router(backtest.router)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
