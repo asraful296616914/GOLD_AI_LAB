@@ -288,7 +288,10 @@ async def load_approved():
         rows = await asyncio.to_thread(db_rows, "SELECT result FROM ai_backtest ORDER BY id DESC LIMIT 1")
         if rows:
             result = json.loads(rows[0]["result"])
-            if "approved" in result:
+            strategies = result.get("strategies") or []
+            if strategies and "by_rr" in strategies[0]:
+                value = {name: float(rr) for name, rr in backtest.compute_approved(strategies).items()}
+            elif "approved" in result:
                 value = {name: float(rr) for name, rr in result["approved"].items()}
     except Exception:
         logger.exception("Could not load approved strategies")
