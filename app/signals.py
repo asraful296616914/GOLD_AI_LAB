@@ -25,6 +25,8 @@ SL_ATR = 1.5
 TP_ATR = 3.0
 TIMEFRAMES = ("15", "60", "240")
 TF_LABEL = {"15": "M15", "60": "H1", "240": "H4"}
+PAPER_START_BALANCE = float(os.getenv("PAPER_START_BALANCE", "10000"))
+PAPER_RISK_PCT = float(os.getenv("PAPER_RISK_PCT", "1"))
 
 STATE = {"last_run": None, "last_error": None, "market_closed": False}
 RUN_LOCK = asyncio.Lock()
@@ -400,3 +402,71 @@ async def ai_stats():
         decided = row["wins"] + row["losses"]
         row["win_rate"] = round(row["wins"] / decided * 100, 1) if decided else None
     return {"strategies": rows}
+
+
+@router.get("/api/ai/paper")
+async def ai_paper():
+    rows = await asyncio.to_thread(db_rows, "SELECT * FROM ai_signals ORDER BY created_at ASC, id ASC")
+    risk_amount = PAPER_START_BALANCE * PAPER_RISK_PCT / 100
+    closed = []
+    open_trades = []
+
+    for s in rows:
+        risk_unit = abs(s["entry"] - s["stop_loss"])
+        reward_unit = abs(s["take_profit"] - s["entry"])
+        rr = reward_unit / risk_unit if risk_unit else 0
+        if s["status"] == "OPEN":
+            open_trades.append({
+                "id": s["id"], "strategy": s["strategy"], "direction": s["direction"],
+                "entry": s["entry"], "stop_loss": s["stop_loss"], "take_profit": s["take_profit"],
+                "created_at": s["created_at"], "risk_amount": round(risk_amount, 2),
+            })
+            continue
+        if s["status"] == "WIN":
+            pnl = risk_amount * rr
+        elif s["status"] == "LOSS":
+            pnl = -risk_amount
+        else:
+            pnl = 0.0
+        closed.append({
+            "id": s["id"], "strategy": s["strategy"], "direction": s["direction"],
+            "status": s["status"], "pnl": round(pnl, 2),
+            "closed_at": s["closed_at"] or s["created_at"],
+        })
+
+    closed.sort(key=lambda t: t["closed_at"])
+    equity = PAPER_START_BALANCE
+    peak = equity
+    max_dd = 0.0
+    curve = []
+    if rows:
+        curve.append({"time": rows[0]["created_at"], "equity": round(equity, 2)})
+    by_strategy = {}
+    for trade in closed:
+        equity += trade["pnl"]
+        peak = max(peak, equity)
+        if peak > 0:
+            max_dd = max(max_dd, (peak - equity) / peak * 100)
+        curve.append({"time": trade["closed_at"], "equity": round(equity, 2)})
+        item = by_strategy.setdefault(trade["strategy"], {"trades": 0, "net_pnl": 0.0})
+        item["trades"] += 1
+        item["net_pnl"] = round(item["net_pnl"] + trade["pnl"], 2)
+
+    wins = sum(1 for t in closed if t["status"] == "WIN")
+    losses = sum(1 for t in closed if t["status"] == "LOSS")
+    decided = wins + losses
+    net = equity - PAPER_START_BALANCE
+    return {
+        "start_balance": PAPER_START_BALANCE,
+        "risk_pct": PAPER_RISK_PCT,
+        "equity": round(equity, 2),
+        "net_pnl": round(net, 2),
+        "return_pct": round(net / PAPER_START_BALANCE * 100, 2) if PAPER_START_BALANCE else 0,
+        "win_rate": round(wins / decided * 100, 1) if decided else None,
+        "max_drawdown_pct": round(max_dd, 2),
+        "closed_count": len(closed),
+        "open_count": len(open_trades),
+        "open_trades": open_trades,
+        "by_strategy": by_strategy,
+        "curve": curve,
+    }
