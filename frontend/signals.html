@@ -40,6 +40,7 @@ th{color:var(--muted);font-weight:600}
 
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
+<div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>স্ট্র্যাটেজির ফলাফল</h2><div id="stats" class="grid"></div></div>
 <div class="card"><h2>সিগন্যাল তালিকা</h2>
   <div class="scroll"><table>
@@ -61,6 +62,7 @@ async function getJSON(url, opt) {
 }
 async function load() {
   loadPaper();
+  loadSmc();
   try {
     const [st, rs, sg, stats] = await Promise.all([
       getJSON("/api/ai/status"), getJSON("/api/ai/research/latest"),
@@ -111,6 +113,23 @@ async function loadPaper() {
     }
   } catch (e) {
     $("paper").innerHTML = '<div class="muted">পেপার ট্রেডিং ডেটা লোড করা যায়নি</div>';
+  }
+}
+async function loadSmc() {
+  try {
+    const d = await getJSON("/api/ai/smc/zones");
+    const dir = v => v === "bull" ? "বুলিশ ▲" : v === "bear" ? "বেয়ারিশ ▼" : "অনির্ধারিত";
+    const c = d.context || {};
+    const pos = c.range ? (c.range.position === "discount" ? "ডিসকাউন্ট (সস্তা জোন)" : "প্রিমিয়াম (দামি জোন)") + " · EQ " + Number(c.range.eq).toFixed(2) : "-";
+    const zones = (d.zones || []).map(z => '<tr><td>' + esc(z.kind) + '</td><td><span class="badge ' + (z.direction === "bull" ? "BUY" : "SELL") + '">' + (z.direction === "bull" ? "বুলিশ" : "বেয়ারিশ") + '</span></td><td>' + num(z.bottom) + ' – ' + num(z.top) + '</td><td>' + fmtTime(z.time) + '</td></tr>').join("");
+    $("smc").innerHTML = '<div class="grid">'
+      + '<div><div class="muted">H1 ট্রেন্ড</div><div class="big">' + dir(c.h1_trend) + '</div></div>'
+      + '<div><div class="muted">H4 ট্রেন্ড</div><div class="big">' + dir(c.h4_trend) + '</div></div>'
+      + '<div><div class="muted">প্রাইস অবস্থান</div><div style="font-weight:700;margin-top:6px">' + esc(pos) + '</div></div></div>'
+      + '<div class="scroll" style="margin-top:10px"><table><thead><tr><th>ধরন</th><th>দিক</th><th>জোন (নিচ – ওপর)</th><th>তৈরির সময়</th></tr></thead><tbody>'
+      + (zones || '<tr><td colspan="4" class="muted">সক্রিয় জোন নেই</td></tr>') + '</tbody></table></div>';
+  } catch (e) {
+    $("smc").innerHTML = '<div class="muted">SMC ডেটা লোড করা যায়নি</div>';
   }
 }
 $("run").addEventListener("click", async () => {
