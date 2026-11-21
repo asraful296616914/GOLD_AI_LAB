@@ -195,6 +195,32 @@ def verdict(all_metrics):
     return "WEAK"
 
 
+def compute_approved(rows):
+    approved = {}
+    for row in rows:
+        variants = row.get("by_rr") or {}
+        positive = sum(
+            1 for v in variants.values()
+            if v["all"]["trades"] >= MIN_TRADES and (v["all"]["expectancy_r"] or 0) > 0
+        )
+        if positive < 2:
+            continue
+        best = None
+        for rr_key, variant in variants.items():
+            a = variant["all"]
+            if (
+                a["trades"] >= MIN_TRADES
+                and a["win_rate"] is not None and a["win_rate"] >= MIN_WIN
+                and a["expectancy_r"] is not None and a["expectancy_r"] > 0.05
+                and (a["profit_factor"] or 0) >= 1.1
+            ):
+                if best is None or a["expectancy_r"] > best[1]:
+                    best = (float(rr_key), a["expectancy_r"])
+        if best:
+            approved[row["strategy"]] = best[0]
+    return approved
+
+
 def build_result(trades, h1, h4, days):
     rows = []
     for name in STRATEGY_ORDER:
@@ -213,21 +239,7 @@ def build_result(trades, h1, h4, days):
             "strategy": name, "all": base["all"], "session": base["session"],
             "verdict": base["verdict"], "by_rr": by_rr,
         })
-    approved = {}
-    for row in rows:
-        best = None
-        for rr_key, variant in row["by_rr"].items():
-            a = variant["all"]
-            if (
-                a["trades"] >= MIN_TRADES
-                and a["win_rate"] is not None and a["win_rate"] >= MIN_WIN
-                and a["expectancy_r"] is not None and a["expectancy_r"] > 0.05
-                and (a["profit_factor"] or 0) >= 1.1
-            ):
-                if best is None or a["expectancy_r"] > best[1]:
-                    best = (float(rr_key), a["expectancy_r"])
-        if best:
-            approved[row["strategy"]] = best[0]
+    approved = compute_approved(rows)
     return {
         "generated_at": int(time.time()), "days": days,
         "h1_bars": len(h1), "h4_bars": len(h4),
@@ -300,6 +312,10 @@ async def backtest_get():
                 STATE["result"] = json.loads(rows[0]["result"])
         except Exception:
             logger.exception("Could not load saved backtest")
+    result = STATE["result"]
+    if result and result.get("strategies") and "by_rr" in result["strategies"][0]:
+        result["approved"] = compute_approved(result["strategies"])
+        result["min_win"] = MIN_WIN
     return {
         "status": STATE["status"], "progress": STATE["progress"],
         "error": STATE["error"], "result": STATE["result"],
