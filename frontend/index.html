@@ -158,95 +158,75 @@
             <div class="section-heading">
                 <div>
                     <h2>AI Research Center</h2>
-                    <p>Educational explanations of current and historical market data</p>
+                    <p>Multi-timeframe indicator analysis with a Gemini AI summary</p>
                 </div>
-                <button class="refresh-button" id="refresh-ai-button">↻ Refresh Analysis</button>
             </div>
 
-            <div class="panel ai-intro-panel">
-                <div class="ai-intro-icon">✦</div>
+            <div class="panel research-intro">
                 <div>
-                    <h3>Market Intelligence Workspace</h3>
+                    <span class="research-eyebrow">MARKET INTELLIGENCE WORKSPACE</span>
+                    <h3>Multi-Timeframe Research</h3>
                     <p>
-                        The research engine examines historical candles and technical
-                        indicators. It describes what the data shows; it does not
-                        forecast future prices or provide trading instructions.
+                        The research engine reads historical candles and calculates RSI, EMA,
+                        MACD, Bollinger Bands and ATR for each timeframe. Gemini AI adds a
+                        written summary on top of those readings.
                     </p>
-                    <div class="ai-meta-row">
-                        <span id="ai-analysis-status" class="data-status">Waiting for analysis</span>
-                        <span id="ai-analysis-updated">Not updated yet</span>
+                </div>
+                <div class="research-actions">
+                    <span id="research-status" class="research-status">Waiting for analysis</span>
+                    <button id="research-refresh" class="research-refresh-btn" type="button">↻ Refresh analysis</button>
+                </div>
+            </div>
+
+            <div class="research-notice">
+                <strong>Notice:</strong> Educational analysis only. Indicator readings can be
+                delayed or contradictory. Signals do not guarantee profit and are not
+                financial advice.
+            </div>
+
+            <div class="panel" id="ai-gemini-card" style="margin-bottom:14px">
+                <div class="panel-header">
+                    <div>
+                        <h3>Gemini AI Research</h3>
+                        <p id="ai-gemini-meta">Loading...</p>
                     </div>
+                    <button id="ai-gemini-run" class="research-refresh-btn" type="button">▶ Run Gemini AI</button>
                 </div>
+                <div id="ai-gemini-body"><p class="research-loading">Loading...</p></div>
+                <p style="margin-top:10px"><a href="/signals" style="color:var(--gold)">AI Signals page →</a></p>
             </div>
 
-            <div class="ai-section-heading">
-                <div>
-                    <h3>Multi-Timeframe Overview</h3>
-                    <p>Separate observations for each available timeframe</p>
+            <div id="research-timeframes" class="research-timeframe-grid">
+                <p class="research-loading">Analysis will appear here after data is loaded.</p>
+            </div>
+
+            <div class="research-bottom-grid">
+                <div class="panel research-history-panel">
+                    <div class="research-panel-heading">
+                        <div>
+                            <h3>Recent Snapshots</h3>
+                            <p>Latest analysis refreshes in this session</p>
+                        </div>
+                        <span id="research-history-count" class="research-count">0</span>
+                    </div>
+                    <div id="research-history" class="research-history-list"></div>
                 </div>
-            </div>
 
-            <div id="ai-timeframe-grid" class="ai-timeframe-grid">
-                <div class="ai-empty-state">Analysis will appear here after data is loaded.</div>
-            </div>
-
-            <div class="ai-section-heading">
-                <div>
-                    <h3>Indicator Guide</h3>
-                    <p>What each measurement represents</p>
+                <div class="panel research-guide-panel">
+                    <div class="research-panel-heading">
+                        <div>
+                            <h3>Indicator Guide</h3>
+                            <p>What each measurement represents</p>
+                        </div>
+                    </div>
+                    <ul class="research-observations">
+                        <li><strong>RSI</strong>: momentum from recent average gains and losses.</li>
+                        <li><strong>EMA</strong>: moving average that weights recent closes more.</li>
+                        <li><strong>MACD</strong>: momentum from the gap between two EMAs.</li>
+                        <li><strong>Bollinger Bands</strong>: statistical bands that describe volatility.</li>
+                        <li><strong>ATR</strong>: average recent price range; used for stop loss and take profit levels.</li>
+                    </ul>
                 </div>
-            </div>
-
-            <div class="ai-indicator-grid">
-                <article class="ai-indicator-card">
-                    <span class="ai-indicator-symbol">RSI</span>
-                    <h4>Relative Strength Index</h4>
-                    <p>Compares recent average gains and losses over a selected period. It is a momentum measurement, not a standalone forecast.</p>
-                </article>
-                <article class="ai-indicator-card">
-                    <span class="ai-indicator-symbol">EMA</span>
-                    <h4>Exponential Moving Average</h4>
-                    <p>A weighted average that gives more importance to recent closing prices. EMA20 and EMA50 use different lookback periods.</p>
-                </article>
-                <article class="ai-indicator-card">
-                    <span class="ai-indicator-symbol">MACD</span>
-                    <h4>Moving Average Convergence Divergence</h4>
-                    <p>Compares two exponential moving averages to describe momentum and the relationship between the MACD and signal lines.</p>
-                </article>
-                <article class="ai-indicator-card">
-                    <span class="ai-indicator-symbol">BB</span>
-                    <h4>Bollinger Bands</h4>
-                    <p>Shows a moving average with upper and lower statistical bands. Band width can help describe changing volatility.</p>
-                </article>
-                <article class="ai-indicator-card">
-                    <span class="ai-indicator-symbol">ATR</span>
-                    <h4>Average True Range</h4>
-                    <p>Measures recent price-range variability. It does not indicate whether the market will rise or fall.</p>
-                </article>
-                <article class="ai-indicator-card">
-                    <span class="ai-indicator-symbol">OHLC</span>
-                    <h4>Candle Structure</h4>
-                    <p>Open, high, low and close values describe the range and body of each historical candle.</p>
-                </article>
-            </div>
-
-            <div class="ai-section-heading">
-                <div>
-                    <h3>Research Observations</h3>
-                    <p>Descriptions generated from the latest available candle data</p>
-                </div>
-            </div>
-
-            <div class="panel ai-observations-panel">
-                <div id="ai-observations">
-                    <p class="ai-muted">Waiting for market analysis...</p>
-                </div>
-            </div>
-
-            <div class="ai-notice" id="ai-notice">
-                Educational information only. Indicator readings can be incomplete,
-                delayed, or contradictory. They do not predict future prices and are
-                not financial or trading advice.
             </div>
         </section>
 
