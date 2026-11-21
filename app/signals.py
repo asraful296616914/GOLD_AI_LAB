@@ -31,6 +31,7 @@ MANUAL_GAP_SECONDS = 120
 EXPIRE_SECONDS = 24 * 3600
 MARKET_STALE_SECONDS = 4 * 3600
 SL_ATR = 1.5
+QUALITY_GATE = os.getenv("QUALITY_GATE", "1") == "1"
 TP_ATR = 3.0
 TIMEFRAMES = ("15", "60", "240")
 TF_LABEL = {"15": "M15", "60": "H1", "240": "H4"}
@@ -275,6 +276,37 @@ async def resolve_open(m, symbol):
             )
 
 
+async def load_approved():
+    if not QUALITY_GATE:
+        return None
+    cache = STATE.get("approved_cache")
+    if cache and time.time() - cache[0] < 300:
+        return cache[1]
+    value = None
+    try:
+        await asyncio.to_thread(db_exec, backtest.DDL)
+        rows = await asyncio.to_thread(db_rows, "SELECT result FROM ai_backtest ORDER BY id DESC LIMIT 1")
+        if rows:
+            result = json.loads(rows[0]["result"])
+            if "approved" in result:
+                value = {name: float(rr) for name, rr in result["approved"].items()}
+    except Exception:
+        logger.exception("Could not load approved strategies")
+    STATE["approved_cache"] = (time.time(), value)
+    return value
+
+
+def gate_item(item, approved):
+    if approved is None:
+        return item
+    rr = approved.get(item["strategy"])
+    if rr is None:
+        return None
+    risk = abs(item["entry"] - item["stop_loss"])
+    direction = 1 if item["direction"] == "BUY" else -1
+    return {**item, "take_profit": item["entry"] + direction * rr * risk}
+
+
 async def run_cycle(auto=False):
     if RUN_LOCK.locked():
         return {"status": "busy"}
@@ -348,15 +380,21 @@ async def run_cycle(auto=False):
             {"created_at": now, "symbol": symbol, **research},
         )
 
+        approved = await load_approved()
+
         if rule and rule["direction"] in ("BUY", "SELL") and atr:
             sl, tp = build_levels(rule["direction"], price, atr)
-            added = await asyncio.to_thread(insert_signal, {
-                "created_at": now, "strategy": "RULES_V1", "symbol": symbol, "timeframe": "H1",
-                "direction": rule["direction"], "entry": price, "stop_loss": sl, "take_profit": tp,
-                "confidence": rule["confidence"], "reason": "; ".join(rule["reasons"]),
-            })
-            if added:
-                created.append("RULES_V1")
+            rules_item = gate_item({
+                "strategy": "RULES_V1", "direction": rule["direction"], "entry": price,
+                "stop_loss": sl, "take_profit": tp, "confidence": rule["confidence"],
+                "reason": "; ".join(rule["reasons"]),
+            }, approved)
+            if rules_item:
+                added = await asyncio.to_thread(
+                    insert_signal, {"created_at": now, "symbol": symbol, "timeframe": "H1", **rules_item}
+                )
+                if added:
+                    created.append("RULES_V1")
 
         if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and atr:
             sl, tp = build_levels(gemini["direction"], price, atr)
@@ -370,7 +408,10 @@ async def run_cycle(auto=False):
 
         try:
             smc_result = smc.analyze(h1, atr, candles.get("240"))
-            for item in smc_result["signals"]:
+            for raw_item in smc_result["signals"]:
+                item = gate_item(raw_item, approved)
+                if not item:
+                    continue
                 added = await asyncio.to_thread(insert_signal, {
                     "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
@@ -382,7 +423,10 @@ async def run_cycle(auto=False):
             logger.exception("SMC analysis failed")
 
         try:
-            for item in classic.analyze(m, h1, atr):
+            for raw_item in classic.analyze(m, h1, atr):
+                item = gate_item(raw_item, approved)
+                if not item:
+                    continue
                 added = await asyncio.to_thread(insert_signal, {
                     "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
@@ -434,6 +478,8 @@ def ai_status():
         "last_run": STATE["last_run"],
         "last_error": STATE["last_error"],
         "market_closed": STATE["market_closed"],
+        "quality_gate": QUALITY_GATE,
+        "approved": (STATE.get("approved_cache") or (0, None))[1],
     }
 
 
