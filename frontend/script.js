@@ -1245,7 +1245,8 @@ function clearPaperOverlay() {
     });
     paperSeries = [];
     paperPriceLines = [];
-    try { candleSeries.setMarkers([]); } catch (error) { /* no markers */ }
+    paperMarkers = [];
+    applyChartMarkers();
 }
 
 async function refreshPaperOverlay() {
@@ -1325,7 +1326,8 @@ async function refreshPaperOverlay() {
         });
 
         markers.sort((a, b) => a.time - b.time);
-        candleSeries.setMarkers(markers);
+        paperMarkers = markers;
+        applyChartMarkers();
     } catch (error) {
         console.warn("Paper overlay unavailable:", error);
     }
@@ -1358,4 +1360,131 @@ if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", setupPaperOverlay);
 } else {
     setupPaperOverlay();
+}
+
+
+// ==================================================
+// SMC ZONES ON THE MAIN CHART
+// ==================================================
+
+let smcSeries = [];
+let smcMarkers = [];
+let paperMarkers = [];
+let smcOverlayEnabled = true;
+
+function applyChartMarkers() {
+    if (!candleSeries) return;
+    const all = paperMarkers.concat(smcMarkers).sort((a, b) => a.time - b.time);
+    try { candleSeries.setMarkers(all); } catch (error) { /* ignore marker errors */ }
+}
+
+function clearSmcOverlay() {
+    smcSeries.forEach((item) => {
+        try { marketChart.removeSeries(item); } catch (error) { /* already removed */ }
+    });
+    smcSeries = [];
+    smcMarkers = [];
+    applyChartMarkers();
+}
+
+async function refreshSmcOverlay() {
+    if (!candleSeries || !marketChart) return;
+    if (!smcOverlayEnabled) { clearSmcOverlay(); return; }
+
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/smc/zones`, { cache: "no-store" });
+        if (!response.ok) return;
+        const data = await response.json();
+
+        clearSmcOverlay();
+
+        const step = Number(selectedResolution) * 60;
+        const align = (time) => time - (time % step);
+        const lastBar = currentBars.length ? currentBars[currentBars.length - 1].time : null;
+        if (lastBar === null) return;
+
+        const styles = {
+            OB: { bull: "#22c55e", bear: "#ef4444", style: 0, width: 2 },
+            FVG: { bull: "#38bdf8", bear: "#f97316", style: 2, width: 1 },
+            SD: { bull: "#a3e635", bear: "#e879f9", style: 3, width: 1 },
+        };
+
+        (data.zones || []).forEach((zone) => {
+            const look = styles[zone.kind] || styles.OB;
+            const color = zone.direction === "bull" ? look.bull : look.bear;
+            const start = zone.time;
+            const end = lastBar > start ? lastBar : start + step;
+            const label = `${zone.kind} ${zone.direction === "bull" ? "▲" : "▼"}`;
+
+            [[zone.top, true], [zone.bottom, false]].forEach(([price, labelled]) => {
+                const line = marketChart.addLineSeries({
+                    color,
+                    lineWidth: look.width,
+                    lineStyle: look.style,
+                    priceLineVisible: false,
+                    lastValueVisible: labelled,
+                    title: labelled ? label : "",
+                    crosshairMarkerVisible: false,
+                });
+                line.setData([
+                    { time: start, value: Number(price) },
+                    { time: end, value: Number(price) },
+                ]);
+                smcSeries.push(line);
+            });
+        });
+
+        (data.events || []).forEach((event) => {
+            smcMarkers.push({
+                time: align(event.time),
+                position: event.direction === 1 ? "belowBar" : "aboveBar",
+                color: event.direction === 1 ? "#38bdf8" : "#f97316",
+                shape: "square",
+                text: `${event.kind} ${event.direction === 1 ? "▲" : "▼"}`,
+            });
+        });
+
+        (data.sweeps || []).forEach((sweep) => {
+            smcMarkers.push({
+                time: align(sweep.time),
+                position: sweep.direction === 1 ? "belowBar" : "aboveBar",
+                color: "#facc15",
+                shape: "circle",
+                text: "SWEEP",
+            });
+        });
+
+        applyChartMarkers();
+    } catch (error) {
+        console.warn("SMC overlay unavailable:", error);
+    }
+}
+
+function setupSmcOverlay() {
+    const container = document.getElementById("market-chart");
+    if (container && container.parentElement && !document.getElementById("smc-toggle")) {
+        const button = document.createElement("button");
+        button.id = "smc-toggle";
+        button.type = "button";
+        button.className = "research-refresh-btn";
+        button.style.margin = "0 0 8px 8px";
+        button.textContent = "SMC zones: ON";
+        button.addEventListener("click", () => {
+            smcOverlayEnabled = !smcOverlayEnabled;
+            button.textContent = `SMC zones: ${smcOverlayEnabled ? "ON" : "OFF"}`;
+            refreshSmcOverlay();
+        });
+        container.parentElement.insertBefore(button, container);
+    }
+    document.querySelectorAll(".timeframe-btn").forEach((button) => {
+        button.addEventListener("click", () => setTimeout(refreshSmcOverlay, 2800));
+    });
+    setTimeout(refreshSmcOverlay, 5000);
+    setInterval(refreshSmcOverlay, 60000);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupSmcOverlay);
+} else {
+    setupSmcOverlay();
 }
