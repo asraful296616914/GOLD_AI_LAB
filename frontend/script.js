@@ -1488,3 +1488,92 @@ if (document.readyState === "loading") {
 } else {
     setupSmcOverlay();
 }
+
+
+// ==================================================
+// SMC ZONES ON THE MAIN CHART (Order Block / FVG / Supply-Demand)
+// ==================================================
+
+let zoneSeries = [];
+let zoneOverlayEnabled = true;
+
+function clearZoneOverlay() {
+    zoneSeries.forEach((item) => {
+        try { marketChart.removeSeries(item); } catch (error) { /* already removed */ }
+    });
+    zoneSeries = [];
+}
+
+async function refreshZoneOverlay() {
+    if (!marketChart) return;
+    if (!zoneOverlayEnabled) { clearZoneOverlay(); return; }
+
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/zones`, { cache: "no-store" });
+        if (!response.ok) return;
+        const { zones } = await response.json();
+        if (!currentBars.length) return;
+
+        clearZoneOverlay();
+
+        const step = Number(selectedResolution) * 60;
+        const lastBar = currentBars[currentBars.length - 1].time;
+
+        zones.forEach((zone) => {
+            const color = zone.direction === "BUY" ? "#22c55e" : "#ef4444";
+            const style = zone.kind === "OB" ? 0 : zone.kind === "FVG" ? 1 : 2;
+            let startTime = zone.start - (zone.start % step);
+            if (startTime >= lastBar) startTime = lastBar - step;
+
+            [zone.high, zone.low].forEach((price) => {
+                const line = marketChart.addLineSeries({
+                    color,
+                    lineWidth: 2,
+                    lineStyle: style,
+                    priceLineVisible: false,
+                    lastValueVisible: false,
+                    crosshairMarkerVisible: false,
+                });
+                line.setData([
+                    { time: startTime, value: Number(price) },
+                    { time: lastBar, value: Number(price) },
+                ]);
+                zoneSeries.push(line);
+            });
+        });
+    } catch (error) {
+        console.warn("SMC zones unavailable:", error);
+    }
+}
+
+function setupZoneOverlay() {
+    const container = document.getElementById("market-chart");
+    if (container && container.parentElement && !document.getElementById("zone-toggle")) {
+        const button = document.createElement("button");
+        button.id = "zone-toggle";
+        button.type = "button";
+        button.className = "research-refresh-btn";
+        button.style.margin = "0 8px 8px 8px";
+        button.textContent = "SMC zones: ON";
+        button.addEventListener("click", () => {
+            zoneOverlayEnabled = !zoneOverlayEnabled;
+            button.textContent = `SMC zones: ${zoneOverlayEnabled ? "ON" : "OFF"}`;
+            refreshZoneOverlay();
+        });
+
+        const legend = document.createElement("span");
+        legend.style.cssText = "font-size:12px;color:var(--muted,#8a96b0)";
+        legend.textContent = "OB ━ · FVG ┈ · S/D ╌ · সবুজ = বুলিশ, লাল = বেয়ারিশ";
+
+        container.parentElement.insertBefore(button, container);
+        container.parentElement.insertBefore(legend, container);
+    }
+    setTimeout(refreshZoneOverlay, 4500);
+    setInterval(refreshZoneOverlay, 30000);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupZoneOverlay);
+} else {
+    setupZoneOverlay();
+}
