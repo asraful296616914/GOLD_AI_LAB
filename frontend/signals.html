@@ -40,12 +40,6 @@ th{color:var(--muted);font-weight:600}
 
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>বাজারের পটভূমি (সেশন, খবর, ইকোনমিক ইভেন্ট)</h2><div id="ctx" class="muted">লোড হচ্ছে...</div></div>
-<div class="card"><h2>বাজার প্রেক্ষাপট (সেশন · খবর · ইকোনমিক ক্যালেন্ডার)</h2>
-  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-    <button id="ctx-run">↻ প্রেক্ষাপট আপডেট</button><span class="muted" id="ctx-status"></span>
-  </div>
-  <div id="ctx-body" class="muted">লোড হচ্ছে...</div>
-</div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
 <div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
@@ -87,7 +81,6 @@ async function getJSON(url, opt) {
 }
 async function load() {
   loadPaper();
-  loadContext();
   loadContext();
   loadReviews();
   loadSmc();
@@ -254,35 +247,6 @@ async function loadReviews() {
     ).join("") : '<tr><td colspan="6" class="muted">এখনো কোনো যাচাই নেই</td></tr>';
   } catch (e) {}
 }
-async function loadContext() {
-  try {
-    const d = await getJSON("/api/ai/context");
-    const c = d.context, s = d.session;
-    const riskCls = { LOW: "WIN", MEDIUM: "OPEN", HIGH: "LOSS" };
-    const biasCls = { BULLISH: "BUY", BEARISH: "SELL", NEUTRAL: "NEUTRAL" };
-    let h = '<p><b>এখনকার সেশন:</b> ' + esc(s.name) + ' · ভোলাটিলিটি: ' + esc(s.volatility) + ' <span class="muted">(' + esc(s.note) + ')</span></p>';
-    h += d.blocked ? '<p style="color:#ef4444">⛔ নতুন সিগন্যাল বন্ধ: ' + esc(d.blocked) + '</p>' : '<p style="color:#22c55e">✔ নতুন সিগন্যাল চালু</p>';
-    if (c) {
-      h += '<p><span class="badge ' + biasCls[c.bias] + '">' + esc(c.bias) + '</span> ' + esc(c.confidence) + '% · ঝুঁকি: <span class="badge ' + riskCls[c.risk_level] + '">' + esc(c.risk_level) + '</span></p>';
-      h += '<p>' + esc(c.summary) + '</p>';
-      if (c.drivers.length) h += '<ul>' + c.drivers.map(x => '<li>' + esc(x) + '</li>').join("") + '</ul>';
-      if (c.events.length) h += '<div class="scroll"><table><thead><tr><th>সময়</th><th>ইভেন্ট</th><th>প্রভাব</th><th>নোট</th></tr></thead><tbody>'
-        + c.events.map(e => '<tr><td>' + (e.time ? fmtTime(e.time) : "অজানা") + '</td><td>' + esc(e.name) + '</td><td>' + esc(e.impact) + '</td><td>' + esc(e.note) + '</td></tr>').join("") + '</tbody></table></div>';
-      $("ctx-status").textContent = "আপডেট: " + fmtTime(c.updated_at) + " · " + c.model + " · লাইভ ওয়েব সার্চ: " + (c.grounded ? "চালু" : "বন্ধ, খবর যাচাই হয়নি");
-    } else {
-      h += '<p class="muted">এখনো প্রেক্ষাপট তৈরি হয়নি' + (d.error ? " (" + esc(d.error) + ")" : "") + '</p>';
-      $("ctx-status").textContent = d.error || "";
-    }
-    $("ctx-body").innerHTML = h;
-  } catch (e) {
-    $("ctx-body").textContent = "প্রেক্ষাপট লোড করা যায়নি";
-  }
-}
-$("ctx-run").addEventListener("click", async () => {
-  const b = $("ctx-run"); b.disabled = true; $("ctx-status").textContent = "বিশ্লেষণ চলছে (খবর খোঁজা হচ্ছে)...";
-  try { await getJSON("/api/ai/context/refresh", { method: "POST" }); } catch (e) {}
-  b.disabled = false; loadContext();
-});
 $("run").addEventListener("click", async () => {
   const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
   try {
