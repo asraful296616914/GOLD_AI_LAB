@@ -47,7 +47,7 @@ th{color:var(--muted);font-weight:600}
     <button id="bt-run">▶ ব্যাকটেস্ট চালাও</button>
     <select id="bt-tf" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="15" selected>M15 (২-৩ ঘণ্টার ট্রেড)</option><option value="5">M5</option><option value="60">H1</option></select>
     <select id="bt-days" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="30">৩০ দিন</option><option value="60">৬০ দিন</option><option value="90" selected>৯০ দিন</option><option value="180">১৮০ দিন</option></select>
-    <select id="bt-rr" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="2.0" selected>টার্গেট ১:২</option><option value="3.0">টার্গেট ১:৩</option></select>
+    <select id="bt-rr" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="2.0" selected>টার্গেট ১:২</option><option value="3.0">টার্গেট ১:৩</option><option value="ADAPT">টার্গেট: AI অ্যাডাপ্টিভ</option></select>
     <select id="bt-filter" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"></select>
     <span class="muted" id="bt-status">লোড হচ্ছে...</span>
   </div>
@@ -156,6 +156,7 @@ async function loadSmc() {
 }
 let btTimer = null;
 const f1 = v => (v == null ? "-" : v);
+const rrText = v => (v === "ADAPT" ? "AI অ্যাডাপ্টিভ" : "১:" + v);
 const fLabel = (ids, labels) => { const k = ids.length ? ids.join("+") : "NONE"; return labels[k] || k; };
 function renderBacktest(r) {
   window.btResult = r;
@@ -186,10 +187,12 @@ function renderBacktest(r) {
   }).join("");
   const ap = r.approved || {};
   const names = Object.keys(ap);
+  const perDay = names.reduce((s, k) => s + (ap[k].per_day || 0), 0);
   const apText = '<b>লাইভে অনুমোদিত (জয় ≥ ' + r.min_win + '%, দুই অর্ধেকেই লাভজনক): </b>'
-    + (names.length ? names.map(k => esc(k) + ' (১:' + ap[k].rr + ', ' + esc(fLabel(ap[k].filters, labels)) + ', জয় ' + ap[k].win_rate + '%, ' + ap[k].trades + ' ট্রেড)').join("; ")
-      : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে") + '<br>';
-  const cl = (r.closest || []).map(c => esc(c.strategy) + ' (১:' + c.rr + ', ' + esc(fLabel(c.filters, labels)) + ': জয় ' + c.win_rate + '%, ' + c.trades + ' ট্রেড, গড় R ' + c.expectancy_r + ')');
+    + (names.length ? names.map(k => esc(k) + ' (' + rrText(ap[k].rr) + ', ' + esc(fLabel(ap[k].filters, labels)) + ', জয় ' + ap[k].win_rate + '%, ' + ap[k].trades + ' ট্রেড' + (ap[k].per_day ? ', ~' + ap[k].per_day + '/দিন' : '') + ')').join("; ")
+      : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে")
+    + (names.length ? '<br><b>আনুমানিক মোট (ওভারল্যাপসহ):</b> ~' + perDay.toFixed(1) + ' সিগন্যাল/দিন; লাইভে দৈনিক সীমা প্রযোজ্য (ডিফল্ট ২টা)' : "") + '<br>';
+  const cl = (r.closest || []).map(c => esc(c.strategy) + ' (' + rrText(c.rr) + ', ' + esc(fLabel(c.filters, labels)) + ': জয় ' + c.win_rate + '%, ' + c.trades + ' ট্রেড, গড় R ' + c.expectancy_r + ')');
   const clText = cl.length ? '<b>সবচেয়ে বেশি জয়ের হার (লাভজনক সংযোগের মধ্যে): </b>' + cl.join("; ") + '<br>' : "";
   $("bt-note").innerHTML = apText + clText + r.assumptions.map(x => "• " + esc(x)).join("<br>");
 }
