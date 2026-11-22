@@ -318,14 +318,18 @@ async def load_approved():
     cache = STATE.get("approved_cache")
     if cache and time.time() - cache[0] < 300:
         return cache[1]
-    value = None
+    value = {}
     try:
         await asyncio.to_thread(db_exec, backtest.DDL)
-        rows = await asyncio.to_thread(db_rows, "SELECT result FROM ai_backtest ORDER BY id DESC LIMIT 1")
+        rows = await asyncio.to_thread(
+            db_rows,
+            "SELECT result FROM ai_backtest WHERE result LIKE :pattern ORDER BY id DESC LIMIT 1",
+            {"pattern": '%"timeframe": "' + STRAT_TF + '"%'},
+        )
         if rows:
             result = json.loads(rows[0]["result"])
             strategies = result.get("strategies") or []
-            if strategies and "variants" in strategies[0] and str(result.get("timeframe", "60")) == STRAT_TF:
+            if strategies and "variants" in strategies[0]:
                 value = backtest.compute_approved(strategies)
     except Exception:
         logger.exception("Could not load approved strategies")
