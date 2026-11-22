@@ -45,14 +45,15 @@ th{color:var(--muted);font-weight:600}
 <div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
     <button id="bt-run">▶ ব্যাকটেস্ট চালাও</button>
-    <select id="bt-days" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="180" selected>১৮০ দিন</option><option value="90">৯০ দিন</option></select>
+    <select id="bt-tf" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="15" selected>M15 (২-৩ ঘণ্টার ট্রেড)</option><option value="5">M5</option><option value="60">H1</option></select>
+    <select id="bt-days" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="30">৩০ দিন</option><option value="60">৬০ দিন</option><option value="90" selected>৯০ দিন</option><option value="180">১৮০ দিন</option></select>
     <select id="bt-rr" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="2.0" selected>টার্গেট ১:২</option><option value="3.0">টার্গেট ১:৩</option></select>
     <select id="bt-filter" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"></select>
     <span class="muted" id="bt-status">লোড হচ্ছে...</span>
   </div>
   <div class="scroll"><table>
-    <thead><tr><th>স্ট্র্যাটেজি</th><th>ট্রেড</th><th>জয়ের হার</th><th>গড় R</th><th>PF</th><th>নেট R</th><th>ম্যাক্স DD (R)</th><th>১ম অর্ধেক (ট্রেড / R)</th><th>২য় অর্ধেক (ট্রেড / R)</th><th>লক্ষ্য পূরণ?</th></tr></thead>
-    <tbody id="bt-rows"><tr><td colspan="10" class="muted">এখনো চালানো হয়নি</td></tr></tbody>
+    <thead><tr><th>স্ট্র্যাটেজি</th><th>ট্রেড</th><th>জয়ের হার</th><th>গড় R</th><th>PF</th><th>নেট R</th><th>ম্যাক্স DD (R)</th><th>গড় সময় (মিনিট)</th><th>টাইমআউট %</th><th>১ম অর্ধেক (ট্রেড / R)</th><th>২য় অর্ধেক (ট্রেড / R)</th><th>লক্ষ্য পূরণ?</th></tr></thead>
+    <tbody id="bt-rows"><tr><td colspan="12" class="muted">এখনো চালানো হয়নি</td></tr></tbody>
   </table></div>
   <div class="muted" style="margin-top:8px">লক্ষ্য পূরণ = ৩০+ ট্রেড, জয় ≥ ৫০%, গড় R > 0.1। PF = মোট লাভ ÷ মোট ক্ষতি। R = ঝুঁকির একক। অর্ধেক দুটো দেখায় ফল সময়ের সাথে টেকে কিনা।</div>
   <div class="muted" id="bt-note" style="margin-top:6px"></div>
@@ -166,7 +167,7 @@ function renderBacktest(r) {
   const labels = {};
   (r.filters || []).forEach(f => { labels[f.id] = f.label; });
   if (!r.strategies.length || !r.strategies[0].variants) {
-    $("bt-rows").innerHTML = '<tr><td colspan="10" class="muted">পুরনো ফরম্যাটের ফল, নতুন ব্যাকটেস্ট চালান</td></tr>';
+    $("bt-rows").innerHTML = '<tr><td colspan="12" class="muted">পুরনো ফরম্যাটের ফল, নতুন ব্যাকটেস্ট চালান</td></tr>';
     $("bt-note").textContent = "";
     return;
   }
@@ -179,6 +180,7 @@ function renderBacktest(r) {
     const ok = a.win_rate != null && a.win_rate >= r.min_win && a.expectancy_r > 0.1 && a.trades >= 30;
     return '<tr><td>' + esc(s.strategy) + '</td><td>' + a.trades + '</td><td>' + (a.win_rate == null ? "-" : a.win_rate + "%") + '</td>'
       + '<td>' + f1(a.expectancy_r) + '</td><td>' + f1(a.profit_factor) + '</td><td>' + a.net_r + '</td><td>' + a.max_dd_r + '</td>'
+      + '<td>' + f1(a.avg_hold_min) + '</td><td>' + (a.trades ? Math.round(a.expired / a.trades * 100) + '%' : '-') + '</td>'
       + '<td>' + half(v.first) + '</td><td>' + half(v.second) + '</td>'
       + '<td>' + (ok ? '<span class="badge WIN">✓ হ্যাঁ</span>' : '<span class="badge EXPIRED">না</span>') + '</td></tr>';
   }).join("");
@@ -199,7 +201,7 @@ async function loadBacktest() {
     $("bt-run").disabled = running;
     $("bt-status").textContent = running ? "চলছে... " + d.progress + "%"
       : d.status === "error" ? "ব্যর্থ: " + d.error
-      : d.result ? "সর্বশেষ রান: " + fmtTime(d.result.generated_at) + " · " + d.result.days + " দিন · " + d.result.h1_bars + "টি H1 ক্যান্ডেল"
+      : d.result ? "সর্বশেষ রান: " + fmtTime(d.result.generated_at) + " · " + d.result.days + " দিন · " + (d.result.tf_label || "H1") + " · " + d.result.h1_bars + "টি ক্যান্ডেল"
       : "এখনো চালানো হয়নি";
     if (d.result) renderBacktest(d.result);
     if (running) btTimer = setTimeout(loadBacktest, 3000);
@@ -208,11 +210,12 @@ async function loadBacktest() {
   }
 }
 $("bt-run").addEventListener("click", async () => {
-  try { await getJSON("/api/ai/backtest/run?days=" + $("bt-days").value, { method: "POST" }); } catch (e) {}
+  try { await getJSON("/api/ai/backtest/run?days=" + $("bt-days").value + "&tf=" + $("bt-tf").value, { method: "POST" }); } catch (e) {}
   loadBacktest();
 });
 $("bt-rr").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
 $("bt-filter").addEventListener("change", () => { if (window.btResult) renderBacktest(window.btResult); });
+$("bt-tf").addEventListener("change", () => { $("bt-days").value = { "5": "30", "15": "90", "60": "180" }[$("bt-tf").value]; });
 async function loadContext() {
   try {
     const c = await getJSON("/api/ai/context");
