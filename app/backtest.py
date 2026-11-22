@@ -18,6 +18,15 @@ RR_LIST = (2.0, 3.0)
 MIN_TRADES = 30
 MIN_WIN = float(os.getenv("MIN_WIN_RATE", "50"))
 MAX_EXPIRED_SHARE = 0.4
+ADAPT = "ADAPT"
+
+
+def parse_rr(text):
+    return ADAPT if text == ADAPT else float(text)
+
+
+def rr_label(rr):
+    return "AI অ্যাডাপ্টিভ" if rr == ADAPT else f"১:{rr:g}"
 TF_CONFIG = {
     "5": {"window": 400, "htf": "60", "max_days": 45, "label": "M5"},
     "15": {"window": 200, "htf": "60", "max_days": 120, "label": "M15"},
@@ -28,6 +37,8 @@ STRATEGY_ORDER = [
     "BB_BOUNCE", "SR_CANDLE", "TREND_PULLBACK",
     "SUPERTREND", "STOCH_CROSS", "ADX_TREND", "ICHIMOKU_TK", "FIB_PULLBACK", "INSIDE_BAR",
     "PREV_DAY_BREAK", "PIVOT_BOUNCE", "NY_OPEN_BREAK", "KELTNER_BREAK", "HA_TREND", "ROUND_LEVEL",
+    "ENGULFING", "STAR_REVERSAL", "HAMMER_STAR", "THREE_SOLDIERS", "PIERCING_CLOUD", "TWEEZER",
+    "MARUBOZU_BREAK", "GAP_FILL", "GAP_GO",
     "SMC_STRUCTURE", "SMC_SWEEP", "SMC_OB", "SMC_FVG", "SMC_SD", "SMC_V1",
 ]
 STATE = {"status": "idle", "progress": 0, "started_at": None, "error": None, "result": None}
@@ -83,7 +94,7 @@ async def load_history(m, symbol, resolution, days):
     return [out[key] for key in sorted(out)]
 
 
-def simulate(m, sg, smc, classic, classic2, base, htf, spread, tf, progress=None):
+def simulate(m, sg, smc, classic, classic2, patterns, levels, base, htf, spread, tf, progress=None):
     cfg = TF_CONFIG[tf]
     bar_minutes = int(tf)
     htf_minutes = int(cfg["htf"])
@@ -119,7 +130,7 @@ def simulate(m, sg, smc, classic, classic2, base, htf, spread, tf, progress=None
                 outcome, gross = "EXPIRED", (bar["close"] - t["entry"]) * direction / t["risk"]
             if outcome:
                 trades.append({
-                    "strategy": t["strategy"], "filters": t["fid"], "rr": t["rr"],
+                    "strategy": t["strategy"], "filters": t["fid"], "rr": t["rr"], "variant": t["variant"],
                     "direction": t["direction"], "entry": t["entry"],
                     "stop_loss": t["stop_loss"], "take_profit": t["take_profit"], "exit": exit_price,
                     "outcome": outcome, "r": round(gross - spread / t["risk"], 3),
@@ -141,6 +152,7 @@ def simulate(m, sg, smc, classic, classic2, base, htf, spread, tf, progress=None
                 lambda: smc.analyze(window, atr, htf_window)["signals"],
                 lambda: classic.analyze(m, window, atr),
                 lambda: classic2.analyze(m, window, atr),
+                lambda: patterns.analyze(m, window, atr),
             ):
                 try:
                     candidates.extend(source())
@@ -163,6 +175,12 @@ def simulate(m, sg, smc, classic, classic2, base, htf, spread, tf, progress=None
                     if risk <= 0:
                         continue
                     direction = 1 if item["direction"] == "BUY" else -1
+                    try:
+                        adapt = levels.adaptive(
+                            window, item["direction"], item["entry"], item["stop_loss"], atr, bar["time"], max_hold_bars
+                        )
+                    except Exception:
+                        adapt = None
                     for fid, ids in combo_ids.items():
                         if not filters.passes(ids, flag_set, item["direction"]):
                             continue
@@ -171,12 +189,22 @@ def simulate(m, sg, smc, classic, classic2, base, htf, spread, tf, progress=None
                             if key in open_trades:
                                 continue
                             open_trades[key] = {
-                                "strategy": item["strategy"], "fid": fid, "rr": rr,
+                                "strategy": item["strategy"], "fid": fid, "rr": rr, "variant": rr,
                                 "direction": item["direction"], "entry": item["entry"],
                                 "stop_loss": item["stop_loss"],
                                 "take_profit": item["entry"] + direction * rr * risk,
                                 "risk": risk, "opened_i": i, "opened_at": bar["time"],
                             }
+                        if adapt:
+                            key = (item["strategy"], fid, ADAPT)
+                            if key not in open_trades:
+                                open_trades[key] = {
+                                    "strategy": item["strategy"], "fid": fid, "rr": adapt["rr"], "variant": ADAPT,
+                                    "direction": item["direction"], "entry": item["entry"],
+                                    "stop_loss": adapt["stop_loss"], "take_profit": adapt["take_profit"],
+                                    "risk": abs(item["entry"] - adapt["stop_loss"]),
+                                    "opened_i": i, "opened_at": bar["time"],
+                                }
 
         if progress and i % 25 == 0:
             progress(i / n)
@@ -211,7 +239,7 @@ def metrics(trades):
     }
 
 
-def compute_approved(rows):
+def compute_approved(rows, trading_days=None):
     approved = {}
     for row in rows:
         best = None
@@ -231,7 +259,8 @@ def compute_approved(rows):
             fid, rr = best[0].split("|")
             a = best[1]["all"]
             approved[row["strategy"]] = {
-                "fid": fid, "filters": filters.ids(fid), "rr": float(rr), "win_rate": a["win_rate"],
+                "fid": fid, "filters": filters.ids(fid), "rr": parse_rr(rr), "win_rate": a["win_rate"],
+                "per_day": round(a["trades"] / trading_days, 2) if trading_days else None,
                 "trades": a["trades"], "expectancy_r": a["expectancy_r"], "avg_hold_min": a["avg_hold_min"],
             }
     return approved
@@ -245,7 +274,7 @@ def compute_closest(rows, limit=6):
             if a["trades"] >= MIN_TRADES and (a["expectancy_r"] or 0) > 0 and a["win_rate"] is not None:
                 fid, rr = key.split("|")
                 found.append({
-                    "strategy": row["strategy"], "filters": filters.ids(fid), "rr": float(rr),
+                    "strategy": row["strategy"], "filters": filters.ids(fid), "rr": parse_rr(rr),
                     "win_rate": a["win_rate"], "trades": a["trades"],
                     "expectancy_r": a["expectancy_r"], "profit_factor": a["profit_factor"],
                     "avg_hold_min": a["avg_hold_min"],
@@ -259,12 +288,12 @@ def build_result(trades, base, htf, days, tf):
     mid = (base[0]["time"] + base[-1]["time"]) // 2
     grouped = {}
     for t in trades:
-        grouped.setdefault((t["strategy"], t["filters"], t["rr"]), []).append(t)
+        grouped.setdefault((t["strategy"], t["filters"], t["variant"]), []).append(t)
     rows = []
     for name in STRATEGY_ORDER:
         variants = {}
         for fid in filters.COMBOS:
-            for rr in RR_LIST:
+            for rr in (*RR_LIST, ADAPT):
                 sub = grouped.get((name, fid, rr), [])
                 variants[f"{fid}|{rr}"] = {
                     "all": metrics(sub),
@@ -273,7 +302,8 @@ def build_result(trades, base, htf, days, tf):
                 }
         rows.append({"strategy": name, "variants": variants})
 
-    approved = compute_approved(rows)
+    trading_days = max(1, len({c["time"] // 86400 for c in base if (c["time"] // 86400 + 3) % 7 < 5}))
+    approved = compute_approved(rows, trading_days)
 
     wanted = [(name, rule["fid"], rule["rr"]) for name, rule in approved.items()]
     ranked = sorted(
@@ -286,7 +316,7 @@ def build_result(trades, base, htf, days, tf):
     )
     for _, name, vkey in ranked[:10]:
         fid, rr = vkey.split("|")
-        wanted.append((name, fid, float(rr)))
+        wanted.append((name, fid, parse_rr(rr)))
     trade_sets, set_meta, seen = {}, [], set()
     for name, fid, rr in wanted:
         key = f"{name}|{fid}|{rr}"
@@ -305,7 +335,7 @@ def build_result(trades, base, htf, days, tf):
         stats = next(r["variants"][f"{fid}|{rr}"]["all"] for r in rows if r["strategy"] == name)
         set_meta.append({
             "key": key, "strategy": name, "rr": rr, "filters": fid,
-            "label": f"{name} · ১:{rr:g} · {filters.LABELS[fid]} · জয় {stats['win_rate']}% · {stats['trades']} ট্রেড"
+            "label": f"{name} · {rr_label(rr)} · {filters.LABELS[fid]} · জয় {stats['win_rate']}% · {stats['trades']} ট্রেড"
                      + (" ✓" if name in approved and approved[name]["fid"] == fid and approved[name]["rr"] == rr else ""),
         })
 
@@ -315,7 +345,7 @@ def build_result(trades, base, htf, days, tf):
         "h1_bars": len(base), "h4_bars": len(htf),
         "from": base[0]["time"], "to": base[-1]["time"],
         "spread": SPREAD, "min_win": MIN_WIN,
-        "rr_list": [str(rr) for rr in RR_LIST],
+        "rr_list": [str(rr) for rr in RR_LIST] + [ADAPT], "trading_days": trading_days,
         "filters": [{"id": fid, "label": filters.LABELS[fid]} for fid in filters.COMBOS],
         "strategies": rows,
         "approved": approved, "closest": compute_closest(rows),
@@ -323,7 +353,8 @@ def build_result(trades, base, htf, days, tf):
         "assumptions": [
             f"{cfg['label']} ক্যান্ডেলে সিমুলেশন, স্প্রেড ${SPREAD:.2f} ধরা হয়েছে",
             f"প্রতিটা ট্রেড সর্বোচ্চ {MAX_HOLD_HOURS:g} ঘণ্টা ধরে রাখা হয়; তার মধ্যে SL/TP না লাগলে বর্তমান দামে বন্ধ (টাইমআউট)",
-            "টার্গেট ১:২ বা ১:৩; একই ক্যান্ডেলে SL ও TP দুটোই ছুঁলে লস ধরা হয়",
+            "টার্গেট ১:২, ১:৩ বা 'AI অ্যাডাপ্টিভ'; একই ক্যান্ডেলে SL ও TP দুটোই ছুঁলে লস ধরা হয়",
+            "AI অ্যাডাপ্টিভ: SL প্যাটার্ন/জোনের প্রান্তে, TP সবচেয়ে কাছের বাস্তবসম্মত লেভেলে (সুইং, আগের দিনের হাই/লো, পিভট, রাউন্ড নম্বর) যা ভোলাটিলিটি ও সেশন দেখে ৩ ঘণ্টায় পৌঁছানো সম্ভব; জায়গা না থাকলে ট্রেড নেওয়া হয় না",
             "অনুমোদনের শর্ত: ৩০+ ট্রেড, জয় ≥ লক্ষ্য, গড় R > 0.1, PF ≥ 1.3, টাইমআউট ≤ ৪০%, এবং সময়ের প্রথম ও দ্বিতীয় অর্ধেক দুটোতেই লাভজনক",
             "প্রতি (স্ট্র্যাটেজি, ফিল্টার, টার্গেট) সংযোগে একসাথে একটাই ট্রেড; Gemini ব্যাকটেস্ট করা যায় না",
             "অনেক সংযোগ পরীক্ষা করলে কিছু ভাগ্যে ভালো দেখায়; পেপার ট্রেডিংই চূড়ান্ত পরীক্ষা",
@@ -334,7 +365,7 @@ def build_result(trades, base, htf, days, tf):
 async def run_job(days, tf):
     STATE.update(status="running", progress=0, error=None, started_at=int(time.time()))
     try:
-        from app import main as m, signals as sg, smc, classic, classic2
+        from app import main as m, signals as sg, smc, classic, classic2, patterns, levels
 
         cfg = TF_CONFIG[tf]
         days = min(days, cfg["max_days"])
@@ -351,7 +382,9 @@ async def run_job(days, tf):
         def progress(fraction):
             STATE["progress"] = 5 + round(fraction * 95)
 
-        trades = await asyncio.to_thread(simulate, m, sg, smc, classic, classic2, base, htf, SPREAD, tf, progress)
+        trades = await asyncio.to_thread(
+            simulate, m, sg, smc, classic, classic2, patterns, levels, base, htf, SPREAD, tf, progress
+        )
         result = build_result(trades, base, htf, days, tf)
         STATE.update(status="done", progress=100, result=result)
         try:
@@ -399,7 +432,7 @@ async def backtest_get():
     if result:
         view = {k: v for k, v in result.items() if k != "trade_sets"}
         if view.get("strategies") and "variants" in view["strategies"][0]:
-            view["approved"] = compute_approved(view["strategies"])
+            view["approved"] = compute_approved(view["strategies"], view.get("trading_days"))
             view["closest"] = compute_closest(view["strategies"])
             view["min_win"] = MIN_WIN
     return {
