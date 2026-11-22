@@ -31,13 +31,15 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:ge
 AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
 AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "15")))
 MANUAL_GAP_SECONDS = 120
-EXPIRE_SECONDS = 24 * 3600
+EXPIRE_SECONDS = 3 * 3600
 MARKET_STALE_SECONDS = 4 * 3600
 SL_ATR = 1.5
 QUALITY_GATE = os.getenv("QUALITY_GATE", "1") == "1"
 TP_ATR = 3.0
 TIMEFRAMES = ("15", "60", "240")
-TF_LABEL = {"15": "M15", "60": "H1", "240": "H4"}
+TF_LABEL = {"5": "M5", "15": "M15", "60": "H1", "240": "H4"}
+STRAT_TF = os.getenv("STRAT_TF", "15") if os.getenv("STRAT_TF", "15") in ("5", "15", "60") else "15"
+STRAT_WINDOW = {"5": 400, "15": 200, "60": 160}[STRAT_TF]
 PAPER_START_BALANCE = float(os.getenv("PAPER_START_BALANCE", "10000"))
 PAPER_RISK_PCT = float(os.getenv("PAPER_RISK_PCT", "1"))
 
@@ -323,7 +325,7 @@ async def load_approved():
         if rows:
             result = json.loads(rows[0]["result"])
             strategies = result.get("strategies") or []
-            if strategies and "variants" in strategies[0]:
+            if strategies and "variants" in strategies[0] and str(result.get("timeframe", "60")) == STRAT_TF:
                 value = backtest.compute_approved(strategies)
     except Exception:
         logger.exception("Could not load approved strategies")
@@ -356,11 +358,12 @@ async def run_cycle(auto=False):
         from app import main as m
 
         symbol = m.GOLD_SYMBOL
+        fetch_tfs = list(dict.fromkeys([*TIMEFRAMES, STRAT_TF]))
         results = await asyncio.gather(
-            *(m.fetch_analysis_history(symbol, tf) for tf in TIMEFRAMES),
+            *(m.fetch_analysis_history(symbol, tf, bars=STRAT_WINDOW if tf == STRAT_TF else 160) for tf in fetch_tfs),
             return_exceptions=True,
         )
-        candles = {tf: r for tf, r in zip(TIMEFRAMES, results) if not isinstance(r, Exception)}
+        candles = {tf: r for tf, r in zip(fetch_tfs, results) if not isinstance(r, Exception)}
         if "60" not in candles:
             raise HTTPException(status_code=502, detail="H1 ক্যান্ডেল পাওয়া যায়নি")
 
@@ -394,7 +397,13 @@ async def run_cycle(auto=False):
         price = h1[-1]["close"]
         created = []
 
-        rule = rules_signal(m, h1)
+        base = candles.get(STRAT_TF) or h1
+        htf = candles.get("60") if STRAT_TF in ("5", "15") else candles.get("240")
+        base_atr = m.calculate_atr(base)
+        base_price = base[-1]["close"]
+        tf_name = TF_LABEL.get(STRAT_TF, STRAT_TF)
+
+        rule = rules_signal(m, base)
         summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
         STATE["reviews_used"] = 0
         context = await analyst.build_context(m, h1, atr, now, force=not auto, technical=summary_data)
@@ -428,43 +437,43 @@ async def run_cycle(auto=False):
 
         approved = await load_approved()
         try:
-            flag_set = filters.flags(m, h1, candles.get("240"), atr, h1[-1]["time"]) if atr else None
+            flag_set = filters.flags(m, base, htf, base_atr, base[-1]["time"]) if base_atr else None
         except Exception:
             logger.exception("Filter flags failed")
             flag_set = None
 
-        if rule and rule["direction"] in ("BUY", "SELL") and atr:
-            sl, tp = build_levels(rule["direction"], price, atr)
+        if rule and rule["direction"] in ("BUY", "SELL") and base_atr:
+            sl, tp = build_levels(rule["direction"], base_price, base_atr)
             rules_item = gate_item({
-                "strategy": "RULES_V1", "direction": rule["direction"], "entry": price,
+                "strategy": "RULES_V1", "direction": rule["direction"], "entry": base_price,
                 "stop_loss": sl, "take_profit": tp, "confidence": rule["confidence"],
                 "reason": "; ".join(rule["reasons"]),
             }, approved, flag_set)
             if rules_item:
                 added = await publish(
-                    {"created_at": now, "symbol": symbol, "timeframe": "H1", **rules_item}, context
+                    {"created_at": now, "symbol": symbol, "timeframe": tf_name, **rules_item}, context
                 )
                 if added:
                     created.append("RULES_V1")
 
-        if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and atr:
-            sl, tp = build_levels(gemini["direction"], price, atr)
+        if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and base_atr:
+            sl, tp = build_levels(gemini["direction"], base_price, base_atr)
             added = await asyncio.to_thread(insert_signal, {
-                "created_at": now, "strategy": "GEMINI_V1", "symbol": symbol, "timeframe": "H1",
-                "direction": gemini["direction"], "entry": price, "stop_loss": sl, "take_profit": tp,
+                "created_at": now, "strategy": "GEMINI_V1", "symbol": symbol, "timeframe": tf_name,
+                "direction": gemini["direction"], "entry": base_price, "stop_loss": sl, "take_profit": tp,
                 "confidence": gemini["confidence"], "reason": gemini["summary"][:400],
             })
             if added:
                 created.append("GEMINI_V1")
 
         try:
-            smc_result = smc.analyze(h1, atr, candles.get("240"))
+            smc_result = smc.analyze(base, base_atr, htf)
             for raw_item in smc_result["signals"]:
                 item = gate_item(raw_item, approved, flag_set)
                 if not item:
                     continue
                 added = await publish({
-                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
+                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": tf_name,
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
                     "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
                 }, context)
@@ -474,12 +483,12 @@ async def run_cycle(auto=False):
             logger.exception("SMC analysis failed")
 
         try:
-            for raw_item in [*classic.analyze(m, h1, atr), *classic2.analyze(m, h1, atr)]:
+            for raw_item in [*classic.analyze(m, base, base_atr), *classic2.analyze(m, base, base_atr)]:
                 item = gate_item(raw_item, approved, flag_set)
                 if not item:
                     continue
                 added = await publish({
-                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": "H1",
+                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": tf_name,
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
                     "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
                 }, context)
