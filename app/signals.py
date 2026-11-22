@@ -14,6 +14,8 @@ from app.database import engine
 from app import smc
 from app import classic
 from app import classic2
+from app import patterns
+from app import levels
 from app import filters
 from app import analyst
 from app import backtest
@@ -32,6 +34,8 @@ AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
 AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "15")))
 MANUAL_GAP_SECONDS = 120
 EXPIRE_SECONDS = 3 * 3600
+MAX_DAILY_SIGNALS = int(os.getenv("MAX_DAILY_SIGNALS", "2"))
+MIN_GAP_SECONDS = int(os.getenv("MIN_SIGNAL_GAP_MINUTES", "60")) * 60
 MARKET_STALE_SECONDS = 4 * 3600
 SL_ATR = 1.5
 QUALITY_GATE = os.getenv("QUALITY_GATE", "1") == "1"
@@ -292,8 +296,23 @@ def signal_exists(row):
         ).first() is not None
 
 
+def signals_today(now):
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT COUNT(*) AS n, COALESCE(MAX(created_at), 0) AS last FROM ai_signals "
+                "WHERE strategy <> 'GEMINI_V1' AND created_at >= :day"
+            ),
+            {"day": now - now % 86400},
+        ).first()
+        return int(row[0]), int(row[1])
+
+
 async def publish(row, context):
     if await asyncio.to_thread(signal_exists, row):
+        return False
+    today_count, last_at = await asyncio.to_thread(signals_today, int(time.time()))
+    if today_count >= MAX_DAILY_SIGNALS or (last_at and time.time() - last_at < MIN_GAP_SECONDS):
         return False
     if context and context.get("blackout"):
         event = context["blackout"]
@@ -337,7 +356,7 @@ async def load_approved():
     return value
 
 
-def gate_item(item, approved, flag_set):
+def gate_item(item, approved, flag_set, level_ctx=None):
     if approved is None:
         return item
     rule = approved.get(item["strategy"])
@@ -345,6 +364,19 @@ def gate_item(item, approved, flag_set):
         return None
     if not filters.passes(rule["filters"], flag_set, item["direction"]):
         return None
+    if rule["rr"] == "ADAPT":
+        if not level_ctx:
+            return None
+        hold_bars = max(1, int(EXPIRE_SECONDS / 60 / int(STRAT_TF)))
+        lv = levels.adaptive(
+            level_ctx["base"], item["direction"], item["entry"], item["stop_loss"],
+            level_ctx["atr"], level_ctx["now"], hold_bars,
+        )
+        if not lv:
+            return None
+        note = f" | AI স্তর: ঝুঁকি-লাভ ১:{lv['rr']:.1f} (লক্ষ্য: {lv['target']})"
+        return {**item, "stop_loss": lv["stop_loss"], "take_profit": lv["take_profit"],
+                "reason": (item.get("reason", "") + note)[:400]}
     risk = abs(item["entry"] - item["stop_loss"])
     direction = 1 if item["direction"] == "BUY" else -1
     return {**item, "take_profit": item["entry"] + direction * rule["rr"] * risk}
@@ -445,20 +477,26 @@ async def run_cycle(auto=False):
         except Exception:
             logger.exception("Filter flags failed")
             flag_set = None
+        level_ctx = {"base": base, "atr": base_atr, "now": base[-1]["time"]}
+        pool = []
+
+        def collect(raw_item):
+            item = gate_item(raw_item, approved, flag_set, level_ctx)
+            if item:
+                score = ((approved or {}).get(item["strategy"]) or {}).get("expectancy_r") or 0
+                pool.append((score, {
+                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": tf_name,
+                    "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
+                    "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
+                }))
 
         if rule and rule["direction"] in ("BUY", "SELL") and base_atr:
             sl, tp = build_levels(rule["direction"], base_price, base_atr)
-            rules_item = gate_item({
+            collect({
                 "strategy": "RULES_V1", "direction": rule["direction"], "entry": base_price,
                 "stop_loss": sl, "take_profit": tp, "confidence": rule["confidence"],
                 "reason": "; ".join(rule["reasons"]),
-            }, approved, flag_set)
-            if rules_item:
-                added = await publish(
-                    {"created_at": now, "symbol": symbol, "timeframe": tf_name, **rules_item}, context
-                )
-                if added:
-                    created.append("RULES_V1")
+            })
 
         if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and base_atr:
             sl, tp = build_levels(gemini["direction"], base_price, base_atr)
@@ -471,35 +509,24 @@ async def run_cycle(auto=False):
                 created.append("GEMINI_V1")
 
         try:
-            smc_result = smc.analyze(base, base_atr, htf)
-            for raw_item in smc_result["signals"]:
-                item = gate_item(raw_item, approved, flag_set)
-                if not item:
-                    continue
-                added = await publish({
-                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": tf_name,
-                    "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
-                    "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
-                }, context)
-                if added:
-                    created.append(item["strategy"])
+            for raw_item in smc.analyze(base, base_atr, htf)["signals"]:
+                collect(raw_item)
         except Exception:
             logger.exception("SMC analysis failed")
 
         try:
-            for raw_item in [*classic.analyze(m, base, base_atr), *classic2.analyze(m, base, base_atr)]:
-                item = gate_item(raw_item, approved, flag_set)
-                if not item:
-                    continue
-                added = await publish({
-                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": tf_name,
-                    "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
-                    "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
-                }, context)
-                if added:
-                    created.append(item["strategy"])
+            for raw_item in [
+                *classic.analyze(m, base, base_atr), *classic2.analyze(m, base, base_atr),
+                *patterns.analyze(m, base, base_atr),
+            ]:
+                collect(raw_item)
         except Exception:
             logger.exception("Classic strategies failed")
+
+        pool.sort(key=lambda entry: entry[0], reverse=True)
+        for _, row in pool:
+            if await publish(row, context):
+                created.append(row["strategy"])
 
         STATE["last_run"] = now
         STATE["last_error"] = gemini_error
