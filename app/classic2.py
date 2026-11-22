@@ -244,10 +244,10 @@ def analyze(m, c, atr, strict=False):
         if not 14 <= hour < 18:
             return
         day_start = last["time"] - last["time"] % 86400
-        opening = [x for x in c if x["time"] == day_start + 13 * 3600]
+        opening = [x for x in c if day_start + 13 * 3600 <= x["time"] < day_start + 14 * 3600]
         if not opening:
             return
-        first = opening[0]
+        first = {"high": max(x["high"] for x in opening), "low": min(x["low"] for x in opening)}
         since = [x for x in c if day_start + 14 * 3600 <= x["time"] < last["time"]]
         mid = (first["high"] + first["low"]) / 2
         if price > first["high"] and all(x["close"] <= first["high"] for x in since):
