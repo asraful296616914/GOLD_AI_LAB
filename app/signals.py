@@ -15,12 +15,14 @@ from app import smc
 from app import classic
 from app import classic2
 from app import filters
+from app import context as ai_context
 from app import analyst
 from app import backtest
 
 logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
 router.include_router(backtest.router)
+router.include_router(ai_context.router)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 GEMINI_FALLBACKS = [
@@ -332,6 +334,9 @@ async def load_approved():
 
 
 def gate_item(item, approved, flag_set):
+    if ai_context.conflicts(item["direction"]):
+        return None
+    item = ai_context.annotate(item)
     if approved is None:
         return item
     rule = approved.get(item["strategy"])
@@ -426,6 +431,13 @@ async def run_cycle(auto=False):
             {"created_at": now, "symbol": symbol, **research},
         )
 
+        blocked = ai_context.risk_window(now)
+        if blocked:
+            STATE["last_run"] = now
+            STATE["last_error"] = gemini_error
+            return {"status": "ok", "created": [], "blocked": blocked,
+                    "gemini": bool(gemini), "gemini_error": gemini_error}
+
         approved = await load_approved()
         try:
             flag_set = filters.flags(m, h1, candles.get("240"), atr, h1[-1]["time"]) if atr else None
@@ -511,6 +523,8 @@ async def start_background():
         return
     if AI_AUTO:
         asyncio.create_task(auto_loop())
+    if ai_context.CONTEXT_AUTO:
+        asyncio.create_task(ai_context.auto_loop())
 
 
 @router.get("/signals", include_in_schema=False)
