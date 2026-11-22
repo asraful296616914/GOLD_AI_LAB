@@ -1370,11 +1370,12 @@ if (document.readyState === "loading") {
 let smcSeries = [];
 let smcMarkers = [];
 let paperMarkers = [];
+let btMarkers = [];
 let smcOverlayEnabled = true;
 
 function applyChartMarkers() {
     if (!candleSeries) return;
-    const all = paperMarkers.concat(smcMarkers).sort((a, b) => a.time - b.time);
+    const all = paperMarkers.concat(smcMarkers, btMarkers).sort((a, b) => a.time - b.time);
     try { candleSeries.setMarkers(all); } catch (error) { /* ignore marker errors */ }
 }
 
@@ -1635,4 +1636,133 @@ if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", setupPaperMonitor);
 } else {
     setupPaperMonitor();
+}
+
+
+// ==================================================
+// BACKTEST TRADES ON THE MAIN CHART (entry, SL, TP, exit)
+// ==================================================
+
+let btSeries = [];
+
+function clearBtOverlay() {
+    btSeries.forEach((item) => {
+        try { marketChart.removeSeries(item); } catch (error) { /* already removed */ }
+    });
+    btSeries = [];
+    btMarkers = [];
+    applyChartMarkers();
+}
+
+function setBtStatus(text) {
+    const el = document.getElementById("bt-chart-status");
+    if (el) el.textContent = text;
+}
+
+async function drawBtTrades() {
+    const select = document.getElementById("bt-chart-set");
+    if (!select || !marketChart || !candleSeries) return;
+    if (!select.value) { clearBtOverlay(); setBtStatus(""); return; }
+    if (!currentBars.length) return;
+
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/backtest/trades?key=${encodeURIComponent(select.value)}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const { trades } = await response.json();
+
+        clearBtOverlay();
+
+        const step = Number(selectedResolution) * 60;
+        const align = (time) => time - (time % step);
+        const firstBar = currentBars[0].time;
+        const lastBar = currentBars[currentBars.length - 1].time;
+        const visible = trades.filter((t) => t[1] >= firstBar && t[0] <= lastBar).slice(-30);
+        const markers = [];
+
+        visible.forEach(([opened, closed, direction, entry, stopLoss, takeProfit, outcome]) => {
+            const start = align(opened);
+            const end = Math.max(align(closed), start + step);
+            [[entry, "#f5b942"], [stopLoss, "#ef4444"], [takeProfit, "#22c55e"]].forEach(([price, color]) => {
+                const line = marketChart.addLineSeries({
+                    color, lineWidth: 1, lineStyle: 2,
+                    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+                });
+                line.setData([{ time: start, value: Number(price) }, { time: end, value: Number(price) }]);
+                btSeries.push(line);
+            });
+            const isBuy = direction > 0;
+            markers.push({
+                time: start,
+                position: isBuy ? "belowBar" : "aboveBar",
+                color: isBuy ? "#22c55e" : "#ef4444",
+                shape: isBuy ? "arrowUp" : "arrowDown",
+                text: isBuy ? "BT BUY" : "BT SELL",
+            });
+            markers.push({
+                time: end,
+                position: "inBar",
+                color: outcome === "W" ? "#22c55e" : outcome === "L" ? "#ef4444" : "#8a96b0",
+                shape: "circle",
+                text: outcome === "W" ? "TP ✓" : outcome === "L" ? "SL ✗" : "⏱",
+            });
+        });
+
+        markers.sort((a, b) => a.time - b.time);
+        btMarkers = markers;
+        applyChartMarkers();
+        setBtStatus(visible.length ? `${visible.length}টি ট্রেড দেখাচ্ছে` : "এই চার্টের সময়সীমায় কোনো ট্রেড নেই (বড় টাইমফ্রেম বেছে দেখুন)");
+    } catch (error) {
+        console.warn("Backtest overlay unavailable:", error);
+    }
+}
+
+async function loadBtSets() {
+    const select = document.getElementById("bt-chart-set");
+    if (!select) return;
+    try {
+        const response = await fetch(`${AI_BASE}/api/ai/backtest/sets`, { cache: "no-store" });
+        if (!response.ok) return;
+        const { sets } = await response.json();
+        const current = select.value;
+        select.replaceChildren();
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "ব্যাকটেস্ট ট্রেড: বন্ধ";
+        select.appendChild(none);
+        sets.forEach((item) => {
+            const option = document.createElement("option");
+            option.value = item.key;
+            option.textContent = item.label;
+            select.appendChild(option);
+        });
+        if (current && sets.some((item) => item.key === current)) select.value = current;
+    } catch (error) {
+        console.warn("Backtest sets unavailable:", error);
+    }
+}
+
+function setupBtOverlay() {
+    const container = document.getElementById("market-chart");
+    if (!container || !container.parentElement || document.getElementById("bt-chart-set")) return;
+
+    const select = document.createElement("select");
+    select.id = "bt-chart-set";
+    select.style.cssText = "max-width:100%;margin:0 8px 8px 0;background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:8px";
+    select.addEventListener("change", drawBtTrades);
+    const status = document.createElement("span");
+    status.id = "bt-chart-status";
+    status.style.cssText = "font-size:12px;color:#8a96b0";
+
+    container.parentElement.insertBefore(select, container);
+    container.parentElement.insertBefore(status, container);
+
+    loadBtSets();
+    setInterval(loadBtSets, 120000);
+    setInterval(drawBtTrades, 20000);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupBtOverlay);
+} else {
+    setupBtOverlay();
 }
