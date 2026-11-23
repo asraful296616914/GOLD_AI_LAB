@@ -318,23 +318,28 @@ def signals_today(now):
         return int(row[0]), int(row[1])
 
 
-async def publish(row, context):
-    if await asyncio.to_thread(signal_exists, row):
+async def publish(row, context, diag=None):
+    def skip(reason):
+        if diag is not None:
+            diag[reason] = diag.get(reason, 0) + 1
         return False
+
+    if await asyncio.to_thread(signal_exists, row):
+        return skip("skipped_duplicate_open_signal")
     if MAX_DAILY_SIGNALS or MIN_GAP_SECONDS:
         today_count, last_at = await asyncio.to_thread(signals_today, int(time.time()))
         if (MAX_DAILY_SIGNALS and today_count >= MAX_DAILY_SIGNALS) or (
             MIN_GAP_SECONDS and last_at and time.time() - last_at < MIN_GAP_SECONDS
         ):
-            return False
+            return skip("skipped_daily_limit_or_gap")
     if context and context.get("blackout"):
         event = context["blackout"]
         await analyst.log_review(row, "BLOCKED", 0, "বড় ইভেন্টের কাছাকাছি সময়: " + event["name"])
-        return False
+        return skip("skipped_news_blackout")
     verdict = await analyst.review(row, context) if context else None
     if verdict:
         if verdict["verdict"] != "APPROVE":
-            return False
+            return skip("ai_review_" + str(verdict["verdict"]).lower())
         row = {
             **row, "confidence": verdict["confidence"],
             "reason": (row.get("reason", "") + " | AI যাচাই: " + verdict["reason"])[:400],
@@ -344,6 +349,8 @@ async def publish(row, context):
     added = await asyncio.to_thread(insert_signal, row)
     if added:
         asyncio.create_task(notify.notify_new(row))
+    else:
+        return skip("skipped_duplicate_open_signal")
     return added
 
 
@@ -374,24 +381,31 @@ async def load_approved(tf=None):
     return value
 
 
-def gate_item(item, approved, flag_set, level_ctx=None):
+def gate_item(item, approved, flag_set, level_ctx=None, diag=None):
+    def reject(reason):
+        if diag is not None:
+            diag[reason] = diag.get(reason, 0) + 1
+        return None
+
     if approved is None:
         return item
     rule = approved.get(item["strategy"])
-    if not rule or flag_set is None:
-        return None
+    if not rule:
+        return reject("blocked_not_approved")
+    if flag_set is None:
+        return reject("blocked_no_filter_data")
     if not filters.passes(rule["filters"], flag_set, item["direction"]):
-        return None
+        return reject("blocked_by_filter")
     if rule["rr"] == "ADAPT":
         if not level_ctx:
-            return None
+            return reject("blocked_adapt")
         hold_bars = max(1, int(EXPIRE_SECONDS / 60 / int(level_ctx.get("tf", STRAT_TF))))
         lv = levels.adaptive(
             level_ctx["base"], item["direction"], item["entry"], item["stop_loss"],
             level_ctx["atr"], level_ctx["now"], hold_bars,
         )
         if not lv:
-            return None
+            return reject("blocked_adapt")
         note = f" | AI স্তর: ঝুঁকি-লাভ ১:{lv['rr']:.1f} (লক্ষ্য: {lv['target']})"
         return {**item, "stop_loss": lv["stop_loss"], "take_profit": lv["take_profit"],
                 "reason": (item.get("reason", "") + note)[:400]}
@@ -418,6 +432,10 @@ async def run_cycle(auto=False, light=False):
             return_exceptions=True,
         )
         candles = {tf: r for tf, r in zip(fetch_tfs, results) if not isinstance(r, Exception)}
+        failed_tfs = {
+            TF_LABEL.get(tf, tf): str(getattr(r, "detail", r))[:160]
+            for tf, r in zip(fetch_tfs, results) if isinstance(r, Exception)
+        }
         if "60" not in candles:
             raise HTTPException(status_code=502, detail="H1 ক্যান্ডেল পাওয়া যায়নি")
 
@@ -493,10 +511,21 @@ async def run_cycle(auto=False, light=False):
             )
 
         pool = []
+        diag = {
+            "at": now, "auto": auto, "light": light,
+            "session": ((context or {}).get("session") or {}).get("name"),
+            "news_blackout": bool((context or {}).get("blackout")),
+            "timeframes_loaded": [TF_LABEL.get(tf, tf) for tf in candles],
+            "timeframes_failed": failed_tfs,
+            "approved_strategies": {},
+            "raw_signals": 0, "passed_quality_gate": 0,
+        }
 
         def collect(raw_item, approved, flag_set, level_ctx, label):
-            item = gate_item(raw_item, approved, flag_set, level_ctx)
+            diag["raw_signals"] += 1
+            item = gate_item(raw_item, approved, flag_set, level_ctx, diag)
             if item:
+                diag["passed_quality_gate"] += 1
                 score = ((approved or {}).get(item["strategy"]) or {}).get("expectancy_r") or 0
                 pool.append((score, {
                     "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": label,
@@ -525,6 +554,7 @@ async def run_cycle(auto=False, light=False):
             htf = candles.get("60") if tf in ("5", "15") else candles.get("240")
             label = TF_LABEL.get(tf, tf)
             approved = await load_approved(tf)
+            diag["approved_strategies"][label] = sorted(approved) if approved is not None else "gate_off"
             try:
                 flag_set = filters.flags(m, base, htf, tf_atr, base[-1]["time"])
             except Exception:
@@ -558,9 +588,11 @@ async def run_cycle(auto=False, light=False):
 
         pool.sort(key=lambda entry: entry[0], reverse=True)
         for _, row in pool:
-            if await publish(row, context):
+            if await publish(row, context, diag):
                 created.append(f"{row['strategy']}@{row['timeframe']}")
 
+        diag["created"] = created
+        STATE["last_diag"] = diag
         STATE["last_run"] = now
         if not light:
             STATE["last_error"] = gemini_error
@@ -609,6 +641,7 @@ def ai_status():
         "market_closed": STATE["market_closed"],
         "quality_gate": QUALITY_GATE,
         "approved": (STATE.get("approved_cache") or (0, None))[1],
+        "last_diag": STATE.get("last_diag"),
     }
 
 

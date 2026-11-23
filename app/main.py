@@ -649,48 +649,64 @@ def describe_candles(candles):
 
 async def fetch_analysis_history(symbol, resolution, bars=160):
     headers = get_pyth_headers()
-    end_time = int(time.time())
-    start_time = end_time - (int(resolution) * 60 * bars)
     endpoint = f"/{PYTH_CHANNEL}/history"
-    response = await pyth_get(
-        endpoint,
-        params={
-            "symbol": symbol,
-            "from": start_time,
-            "to": end_time,
-            "resolution": resolution,
-        },
-        headers=headers,
-        timeout=30,
-    )
-    if response.status_code != 200:
-        handle_pyth_error(response, endpoint)
+    seconds_per_bar = int(resolution) * 60
+    min_candles = 55
+    wanted = max(bars, min_candles)
+    # Step further back only when the window came back mostly empty
+    # (weekend / holiday gap), not for the normal small daily break.
+    enough = max(min_candles, int(bars * 0.8))
+    end_time = int(time.time())
+    merged = {}
 
-    try:
-        data = response.json()
-    except ValueError:
-        raise HTTPException(status_code=502, detail="Invalid analysis history JSON from Pyth")
+    # Gold is closed on weekends. Right after the market reopens a window of
+    # `bars` candles holds only a few candles, which used to make the analysis
+    # (and therefore the signals) unavailable for hours. Collect older windows
+    # until there is enough data for the indicators.
+    for _attempt in range(6):
+        start_time = end_time - seconds_per_bar * bars
+        response = await pyth_get(
+            endpoint,
+            params={
+                "symbol": symbol,
+                "from": start_time,
+                "to": end_time,
+                "resolution": resolution,
+            },
+            headers=headers,
+            timeout=30,
+        )
+        if response.status_code != 200:
+            handle_pyth_error(response, endpoint)
 
-    if not isinstance(data, dict) or data.get("s") != "ok":
-        raise HTTPException(status_code=502, detail=f"Pyth returned no analysis candles for {ANALYSIS_RESOLUTIONS[resolution]}")
+        try:
+            data = response.json()
+        except ValueError:
+            raise HTTPException(status_code=502, detail="Invalid analysis history JSON from Pyth")
 
-    fields = [data.get(key) or [] for key in ("t", "o", "h", "l", "c")]
-    if len({len(field) for field in fields}) != 1:
-        raise HTTPException(status_code=502, detail="Pyth returned inconsistent analysis candles")
+        if not isinstance(data, dict) or data.get("s") not in ("ok", "no_data"):
+            raise HTTPException(status_code=502, detail=f"Pyth returned no analysis candles for {ANALYSIS_RESOLUTIONS[resolution]}")
 
-    timestamps, opens, highs, lows, closes = fields
-    candles = [
-        {
-            "time": int(timestamps[index]),
-            "open": float(opens[index]),
-            "high": float(highs[index]),
-            "low": float(lows[index]),
-            "close": float(closes[index]),
-        }
-        for index in range(len(timestamps))
-    ]
-    candles.sort(key=lambda item: item["time"])
-    if len(candles) < 55:
+        fields = [data.get(key) or [] for key in ("t", "o", "h", "l", "c")]
+        if len({len(field) for field in fields}) != 1:
+            raise HTTPException(status_code=502, detail="Pyth returned inconsistent analysis candles")
+
+        timestamps, opens, highs, lows, closes = fields
+        for index in range(len(timestamps)):
+            merged[int(timestamps[index])] = {
+                "time": int(timestamps[index]),
+                "open": float(opens[index]),
+                "high": float(highs[index]),
+                "low": float(lows[index]),
+                "close": float(closes[index]),
+            }
+
+        if len(merged) >= enough:
+            break
+        end_time = start_time - 1
+
+    candles = [merged[key] for key in sorted(merged)][-wanted:]
+    if len(candles) < min_candles:
         raise HTTPException(
             status_code=502,
             detail=f"Not enough historical candles for {ANALYSIS_RESOLUTIONS[resolution]} indicators",
