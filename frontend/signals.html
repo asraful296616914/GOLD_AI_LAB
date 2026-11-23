@@ -54,6 +54,12 @@ th{color:var(--muted);font-weight:600}
   </div>
   <div class="muted" style="margin-top:8px">কীভাবে: ১) টেলিগ্রামে @BotFather থেকে বট বানিয়ে টোকেন নিন। ২) নিজের বটকে একবার /start পাঠান। ৩) @userinfobot থেকে নিজের চ্যাট আইডি নিন (গ্রুপ হলে বটকে গ্রুপে যোগ করুন)। টোকেন সার্ভারে সংরক্ষিত থাকে, এখানে আর দেখানো হয় না। পাবলিক সাইটে অন্য কেউ যাতে বদলাতে না পারে, Railway Variables-এ ADMIN_KEY দিন।</div>
 </div>
+<div class="card"><h2>Gemini API কী</h2>
+  <div class="muted">প্রতিটা কী আলাদা কাজ করে, তাই আলাদা কোটা ব্যবহার হয়। কোনো কী না দিলে কী ১ ব্যবহার হয়। এক কী-র লিমিট শেষ হলে সিস্টেম অন্য কী-তে নিজে সরে যায় না।</div>
+  <div id="gk-rows"></div>
+  <div class="muted" id="gk-msg"></div>
+  <div class="muted" style="margin-top:6px">মনে রাখবেন: একই Google প্রজেক্টের একাধিক কী একই কোটা ভাগ করে। লিমিট এড়াতে আলাদা প্রজেক্ট বা অ্যাকাউন্ট বানানো Google-এর API শর্তে ঝুঁকিপূর্ণ হতে পারে। আসল সমাধান Google AI Studio-তে বিলিং চালু করা। অ্যাডমিন কী লাগলে টেলিগ্রাম কার্ডের ঘরটা ব্যবহার করুন।</div>
+</div>
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>বাজারের পটভূমি (সেশন, খবর, ইকোনমিক ইভেন্ট)</h2><div id="ctx" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
@@ -312,6 +318,39 @@ $("tg-clear").addEventListener("click", async () => {
   const { ok, data } = await postJSON("/api/ai/telegram/clear", { admin_key: $("tg-admin").value });
   if (ok) { tgRender(data); $("tg-msg").textContent = "মুছে ফেলা হয়েছে"; } else $("tg-msg").textContent = "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
 });
+async function loadGeminiKeys() {
+  try {
+    const d = await getJSON("/api/ai/gemini-keys");
+    $("gk-rows").innerHTML = d.slots.map(s =>
+      '<div style="margin:10px 0;padding:10px;border:1px solid #1c2740;border-radius:10px">'
+      + '<div><b>' + esc(s.label) + '</b></div>'
+      + '<div class="muted">' + (s.configured
+          ? 'সংযুক্ত (' + esc(s.source === "env" ? "Railway Variables" : "এখান থেকে সংরক্ষিত") + ') · ' + esc(s.hint) + ' · কল ' + s.calls + ' · শেষ ফল: ' + esc(s.last_status == null ? "-" : s.last_status)
+          : 'দেওয়া নেই' + (s.slot > 1 ? ' (কী ১ ব্যবহার হচ্ছে)' : '')) + '</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px"><input id="gk-in-' + s.slot + '" type="password" autocomplete="off" placeholder="নতুন API কী" style="flex:1;min-width:180px;background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px">'
+      + '<button data-act="save" data-slot="' + s.slot + '">সংরক্ষণ</button>'
+      + (s.source === "saved" ? '<button data-act="remove" data-slot="' + s.slot + '" style="background:#ef4444;color:#fff">মুছুন</button>' : '')
+      + '</div></div>').join("");
+  } catch (e) {
+    $("gk-rows").textContent = "লোড করা যায়নি";
+  }
+}
+$("gk-rows").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const slot = Number(btn.dataset.slot);
+  const body = { slot, admin_key: $("tg-admin").value };
+  let url = "/api/ai/gemini-keys/remove";
+  if (btn.dataset.act === "save") {
+    body.key = $("gk-in-" + slot).value.trim();
+    url = "/api/ai/gemini-keys/save";
+    if (!body.key) { $("gk-msg").textContent = "আগে কী লিখুন"; return; }
+  }
+  $("gk-msg").textContent = "যাচাই হচ্ছে...";
+  const { ok, data } = await postJSON(url, body);
+  $("gk-msg").textContent = ok ? (btn.dataset.act === "save" ? "কী যাচাই হয়ে সংরক্ষিত ✓" : "মুছে ফেলা হয়েছে") : "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+  loadGeminiKeys();
+});
 $("run").addEventListener("click", async () => {
   const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
   try {
@@ -326,7 +365,7 @@ $("run").addEventListener("click", async () => {
   } catch (e) { $("msg").textContent = "ব্যর্থ: " + e.message; }
   b.disabled = false;
 });
-load(); loadBacktest(); loadTelegram(); setInterval(load, 30000);
+load(); loadBacktest(); loadTelegram(); loadGeminiKeys(); setInterval(load, 30000);
 </script>
 </body>
 </html>
