@@ -199,10 +199,6 @@ def gemini_candidates():
 
 
 async def gemini_analyze(summary):
-    key = await gkeys.key_for("research")
-    if not key:
-        return None, "GEMINI_API_KEY সেট করা নেই"
-
     prompt = (
         "You are a cautious market analyst for XAU/USD (gold). Use ONLY the indicator data below. "
         "Do not invent prices, news or numbers. Return ONLY a JSON object with keys: "
@@ -216,46 +212,32 @@ async def gemini_analyze(summary):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3, "responseMimeType": "application/json"},
     }
-    headers = {"x-goog-api-key": key.strip(), "Content-Type": "application/json"}
-    last_error = "কোনো Gemini মডেল পাওয়া যায়নি"
-
+    data, model, error = await gkeys.generate(body, gemini_candidates(), GEMINI_URL, timeout=45)
+    if not data:
+        return None, error
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
-            for model in gemini_candidates():
-                response = await client.post(GEMINI_URL.format(model=model), headers=headers, json=body)
-                gkeys.record("research", response.status_code)
-                if response.status_code == 404:
-                    last_error = f"{model}: মডেল পাওয়া যায়নি (404)"
-                    continue
-                if response.status_code == 429:
-                    last_error = f"{model}: ফ্রি লিমিট শেষ (429)"
-                    continue
-                if response.status_code != 200:
-                    return None, f"Gemini ত্রুটি {response.status_code} ({model})"
-
-                parts = response.json()["candidates"][0]["content"]["parts"]
-                raw = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
-                raw = re.sub(r"^```(?:json)?|```$", "", raw).strip()
-                parsed = json.loads(raw)
-                direction = str(parsed.get("direction", "NEUTRAL")).upper()
-                if direction not in ("BUY", "SELL", "NEUTRAL"):
-                    direction = "NEUTRAL"
-                try:
-                    confidence = max(0, min(100, int(parsed.get("confidence", 0))))
-                except (TypeError, ValueError):
-                    confidence = 0
-                STATE["gemini_model"] = model
-                return {
-                    "direction": direction,
-                    "confidence": confidence,
-                    "summary": str(parsed.get("summary_bn", ""))[:1200],
-                    "risk_note": str(parsed.get("risk_note_bn", ""))[:600],
-                    "model": model,
-                }, None
-        return None, last_error
-    except Exception as error:
-        logger.exception("Gemini call failed")
-        return None, f"Gemini কল ব্যর্থ: {type(error).__name__}"
+        parts = data["candidates"][0]["content"]["parts"]
+        raw = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+        raw = re.sub(r"^```(?:json)?|```$", "", raw).strip()
+        parsed = json.loads(raw)
+    except Exception:
+        logger.exception("Gemini reply could not be read")
+        return None, "Gemini উত্তর পড়া যায়নি"
+    direction = str(parsed.get("direction", "NEUTRAL")).upper()
+    if direction not in ("BUY", "SELL", "NEUTRAL"):
+        direction = "NEUTRAL"
+    try:
+        confidence = max(0, min(100, int(parsed.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0
+    STATE["gemini_model"] = model
+    return {
+        "direction": direction,
+        "confidence": confidence,
+        "summary": str(parsed.get("summary_bn", ""))[:1200],
+        "risk_note": str(parsed.get("risk_note_bn", ""))[:600],
+        "model": model,
+    }, None
 
 
 async def resolve_open(m, symbol):
@@ -640,7 +622,7 @@ def signals_page():
 @router.get("/api/ai/status")
 def ai_status():
     return {
-        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")) or gkeys.any_configured(),
+        "gemini_configured": gkeys.any_configured(),
         "model": STATE.get("gemini_model") or GEMINI_MODEL or "auto",
         "auto": AI_AUTO,
         "interval_minutes": AI_INTERVAL_MIN,

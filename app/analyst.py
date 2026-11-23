@@ -104,31 +104,17 @@ async def gemini_post(body, role="brief"):
     from app import signals as sg
     from app import gkeys
 
-    key = await gkeys.key_for(role)
-    if not key:
-        return None, "GEMINI_API_KEY সেট করা নেই"
-    headers = {"x-goog-api-key": key.strip(), "Content-Type": "application/json"}
-    last_error = "কোনো Gemini মডেল পাওয়া যায়নি"
+    data, model, error = await gkeys.generate(body, sg.gemini_candidates(), sg.GEMINI_URL, timeout=70)
+    if not data:
+        return None, error
     try:
-        async with httpx.AsyncClient(timeout=70) as client:
-            for model in sg.gemini_candidates():
-                response = await client.post(sg.GEMINI_URL.format(model=model), headers=headers, json=body)
-                gkeys.record(role, response.status_code)
-                if response.status_code in (404, 429):
-                    last_error = f"{model}: {'মডেল নেই (404)' if response.status_code == 404 else 'লিমিট শেষ (429)'}"
-                    continue
-                if response.status_code != 200:
-                    return None, f"Gemini ত্রুটি {response.status_code} ({model})"
-                data = response.json()
-                candidate = data["candidates"][0]
-                parts = candidate["content"]["parts"]
-                text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
-                sg.STATE["gemini_model"] = model
-                return {"text": text, "model": model, "grounded": bool(candidate.get("groundingMetadata"))}, None
-        return None, last_error
-    except Exception as error:
-        logger.exception("Gemini analyst call failed")
-        return None, f"Gemini কল ব্যর্থ: {type(error).__name__}"
+        candidate = data["candidates"][0]
+        parts = candidate["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    except (KeyError, IndexError, TypeError):
+        return None, "Gemini উত্তর পড়া যায়নি"
+    sg.STATE["gemini_model"] = model
+    return {"text": text, "model": model, "grounded": bool(candidate.get("groundingMetadata"))}, None
 
 
 def _event_time(value):
