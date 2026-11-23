@@ -92,12 +92,19 @@ def format_new(row):
     reward = abs(row["take_profit"] - row["entry"])
     rr = f"{reward / risk:.1f}" if risk else "-"
     icon = "🟢" if row["direction"] == "BUY" else "🔴"
+    quality = {"STRONG": "শক্তিশালী ✅", "OK": "মাঝারি", "WEAK": "দুর্বল ⚠️"}.get(row.get("quality"), "অজানা")
+    if row.get("accuracy") is not None:
+        acc_line = f"সম্ভাব্য জয়ের হার: <b>{row['accuracy']}%</b> ({row.get('win_sample') or 0} ট্রেডের হিসাব) · মান: {quality}\n"
+    else:
+        acc_line = f"সম্ভাব্য জয়ের হার: অজানা · মান: {quality}\n"
+    verdict_line = f"AI যাচাই: {row['ai_verdict']}\n" if row.get("ai_verdict") in ("APPROVE", "REJECT", "WAIT") else ""
     return (
         f"{icon} <b>নতুন সিগন্যাল: {_esc(row['direction'])}</b> (XAU/USD · {_esc(row.get('timeframe', ''))})\n"
         f"কৌশল: <b>{_esc(row['strategy'])}</b>\n"
         f"এন্ট্রি: <code>{row['entry']:.2f}</code>\n"
         f"SL: <code>{row['stop_loss']:.2f}</code> · TP: <code>{row['take_profit']:.2f}</code>\n"
         f"ঝুঁকি-লাভ ১:{rr} · কনফিডেন্স {_esc(row.get('confidence', 0))}%\n"
+        f"{acc_line}{verdict_line}"
         f"কারণ: {_esc(str(row.get('reason', ''))[:220])}\n"
         "⚠️ শিক্ষামূলক বিশ্লেষণ, বিনিয়োগ পরামর্শ নয়"
     )

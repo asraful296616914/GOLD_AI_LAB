@@ -415,6 +415,42 @@ async def current_result():
     return STATE["result"]
 
 
+AUTO = os.getenv("BACKTEST_AUTO", "1") == "1"
+AUTO_HOURS = max(1.0, float(os.getenv("BACKTEST_AUTO_HOURS", "6")))
+AUTO_DAYS = {"5": 30, "15": 90, "60": 180}
+
+
+async def latest_age(tf):
+    from app import signals as sg
+
+    await asyncio.to_thread(sg.db_exec, DDL)
+    rows = await asyncio.to_thread(
+        sg.db_rows,
+        "SELECT created_at FROM ai_backtest WHERE result LIKE :pattern ORDER BY id DESC LIMIT 1",
+        {"pattern": '%"timeframe": "' + tf + '"%'},
+    )
+    return int(time.time()) - int(rows[0]["created_at"]) if rows else None
+
+
+async def auto_loop(tfs):
+    """Re-run the backtest by itself (no button needed) whenever the last result is older than AUTO_HOURS."""
+    await asyncio.sleep(90)
+    while True:
+        for tf in tfs:
+            try:
+                while STATE["status"] == "running":
+                    await asyncio.sleep(30)
+                age = await latest_age(tf)
+                if age is None or age >= AUTO_HOURS * 3600:
+                    logger.info("Auto backtest started (tf=%s)", tf)
+                    await run_job(AUTO_DAYS.get(tf, 90), tf)
+                    if STATE["status"] == "error":
+                        await asyncio.sleep(1800)
+            except Exception:
+                logger.exception("Auto backtest loop failed")
+        await asyncio.sleep(600)
+
+
 @router.post("/api/ai/backtest/run")
 async def backtest_run(days: int = Query(90, ge=10, le=180), tf: str = Query("15")):
     if STATE["status"] == "running":

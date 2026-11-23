@@ -56,11 +56,12 @@ th{color:var(--muted);font-weight:600}
 </div>
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>বাজারের পটভূমি (সেশন, খবর, ইকোনমিক ইভেন্ট)</h2><div id="ctx" class="muted">লোড হচ্ছে...</div></div>
+<div class="card"><h2>খবর ও ইভেন্টের ইতিহাস</h2><div id="news-hist" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
 <div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-    <button id="bt-run">▶ ব্যাকটেস্ট চালাও</button>
+    <button id="bt-run">▶ এখনই ব্যাকটেস্ট চালাও (ঐচ্ছিক, অটো চলে)</button>
     <select id="bt-tf" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="15" selected>M15 (২-৩ ঘণ্টার ট্রেড)</option><option value="5">M5</option><option value="60">H1</option></select>
     <select id="bt-days" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="30">৩০ দিন</option><option value="60">৬০ দিন</option><option value="90" selected>৯০ দিন</option><option value="180">১৮০ দিন</option></select>
     <select id="bt-rr" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="2.0" selected>টার্গেট ১:২</option><option value="3.0">টার্গেট ১:৩</option><option value="ADAPT">টার্গেট: AI অ্যাডাপ্টিভ</option></select>
@@ -80,8 +81,8 @@ th{color:var(--muted);font-weight:600}
   <tbody id="rev-rows"><tr><td colspan="6" class="muted">এখনো কোনো যাচাই নেই</td></tr></tbody></table></div></div>
 <div class="card"><h2>সিগন্যাল তালিকা</h2>
   <div class="scroll"><table>
-    <thead><tr><th>সময়</th><th>স্ট্র্যাটেজি</th><th>দিক</th><th>এন্ট্রি</th><th>SL</th><th>TP</th><th>কনফিডেন্স</th><th>অবস্থা</th></tr></thead>
-    <tbody id="rows"><tr><td colspan="8" class="muted">কোনো সিগন্যাল নেই</td></tr></tbody>
+    <thead><tr><th>সময়</th><th>স্ট্র্যাটেজি</th><th>দিক</th><th>এন্ট্রি</th><th>SL</th><th>TP</th><th>কনফিডেন্স</th><th>সম্ভাব্য জয়ের হার</th><th>মান</th><th>AI রায়</th><th>অবস্থা</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="11" class="muted">কোনো সিগন্যাল নেই</td></tr></tbody>
   </table></div>
 </div>
 <p class="muted">এটি শিক্ষামূলক বিশ্লেষণ, বিনিয়োগ পরামর্শ নয়। সিগন্যাল লাভের নিশ্চয়তা দেয় না। আগে ডেমোতে যাচাই করুন।</p>
@@ -109,8 +110,9 @@ async function load() {
     $("status").textContent = "Gemini: " + (st.gemini_configured ? "চালু (" + st.model + ")" : "API Key নেই")
       + " · অটো: " + (st.auto ? "প্রতি " + st.interval_minutes + " মিনিট" : "বন্ধ")
       + " · শেষ রান: " + fmtTime(st.last_run) + (st.market_closed ? " · মার্কেট বন্ধ" : "")
-      + (st.quality_gate ? " · কোয়ালিটি গেট চালু (অনুমোদিত: " + (Object.keys(st.approved || {}).map(function (t) { return t + "=" + st.approved[t].length; }).join(", ") || "এখনো যাচাই হয়নি") + ")" : " · কোয়ালিটি গেট বন্ধ")
-      + (st.last_diag ? " · শেষ সাইকেল: কাঁচা সিগন্যাল " + st.last_diag.raw_signals + ", গেট পাস " + st.last_diag.passed_quality_gate : "");
+      + " · অটো ব্যাকটেস্ট: " + (st.backtest_auto_hours ? "প্রতি " + st.backtest_auto_hours + " ঘণ্টা (অনুমোদিত কৌশল: " + (Object.keys(st.approved || {}).map(function (t) { return t + "=" + st.approved[t].length; }).join(", ") || "এখনো যাচাই হয়নি") + ")" : "বন্ধ")
+      + (st.strict_gate ? " · কড়া গেট চালু (খারাপ সিগন্যাল আটকায়)" : " · সব সিগন্যাল আসে, সাথে সম্ভাব্য জয়ের হার")
+      + (st.last_diag ? " · শেষ সাইকেল: কাঁচা সিগন্যাল " + st.last_diag.raw_signals + ", অনুমোদিত " + st.last_diag.passed_quality_gate : "");
     const r = rs.research;
     $("research").innerHTML = r
       ? '<span class="badge ' + esc(r.bias) + '">' + esc(r.bias) + '</span> <b>' + esc(r.confidence) + '%</b> <span class="muted">· ' + esc(r.model) + ' · ' + fmtTime(r.created_at) + '</span>'
@@ -120,12 +122,22 @@ async function load() {
       '<div><div class="muted">' + esc(s.strategy) + '</div><div class="big">' + (s.win_rate == null ? "-" : s.win_rate + "%") + '</div>'
       + '<div class="muted">জয় ' + s.wins + ' · হার ' + s.losses + ' · চলমান ' + s.open + ' · মেয়াদোত্তীর্ণ ' + s.expired + '</div></div>'
     ).join("") : '<div class="muted">এখনো কোনো ফলাফল নেই</div>';
-    $("rows").innerHTML = sg.signals.length ? sg.signals.map(s =>
-      '<tr><td>' + fmtTime(s.created_at) + '</td><td>' + esc(s.strategy) + '</td>'
-      + '<td><span class="badge ' + esc(s.direction) + '">' + esc(s.direction) + '</span></td>'
-      + '<td>' + num(s.entry) + '</td><td>' + num(s.stop_loss) + '</td><td>' + num(s.take_profit) + '</td>'
-      + '<td>' + esc(s.confidence) + '%</td><td><span class="badge ' + esc(s.status) + '">' + esc(s.status) + '</span></td></tr>'
-    ).join("") : '<tr><td colspan="8" class="muted">কোনো সিগন্যাল নেই</td></tr>';
+    const QC = { STRONG: "WIN", OK: "OPEN", WEAK: "LOSS", UNKNOWN: "EXPIRED" };
+    const QT = { STRONG: "শক্তিশালী", OK: "মাঝারি", WEAK: "দুর্বল", UNKNOWN: "অজানা" };
+    const VC = { APPROVE: "WIN", REJECT: "LOSS", WAIT: "OPEN" };
+    $("rows").innerHTML = sg.signals.length ? sg.signals.map(s => {
+      const q = s.quality || "UNKNOWN";
+      return '<tr><td>' + fmtTime(s.created_at) + '</td><td>' + esc(s.strategy) + '</td>'
+        + '<td><span class="badge ' + esc(s.direction) + '">' + esc(s.direction) + '</span></td>'
+        + '<td>' + num(s.entry) + '</td><td>' + num(s.stop_loss) + '</td><td>' + num(s.take_profit) + '</td>'
+        + '<td>' + esc(s.confidence) + '%</td>'
+        + '<td style="white-space:normal;min-width:240px"><b>' + (s.accuracy == null ? "অজানা" : esc(s.accuracy) + "%") + '</b>'
+        + (s.win_sample ? ' <span class="muted">(' + esc(s.win_sample) + ' ট্রেড)</span>' : '')
+        + '<div class="muted" style="font-size:11px">' + esc(s.accuracy_note || "") + '</div></td>'
+        + '<td><span class="badge ' + (QC[q] || "EXPIRED") + '">' + (QT[q] || "অজানা") + '</span></td>'
+        + '<td>' + (s.ai_verdict ? '<span class="badge ' + (VC[s.ai_verdict] || "OPEN") + '">' + esc(s.ai_verdict) + '</span>' : '-') + '</td>'
+        + '<td><span class="badge ' + esc(s.status) + '">' + esc(s.status) + '</span></td></tr>';
+    }).join("") : '<tr><td colspan="11" class="muted">কোনো সিগন্যাল নেই</td></tr>';
   } catch (e) {
     $("status").textContent = "ডেটা লোড করা যায়নি: " + e.message;
   }
@@ -208,7 +220,7 @@ function renderBacktest(r) {
   const perDay = names.reduce((s, k) => s + (ap[k].per_day || 0), 0);
   const apText = '<b>লাইভে অনুমোদিত (জয় ≥ ' + r.min_win + '%, দুই অর্ধেকেই লাভজনক): </b>'
     + (names.length ? names.map(k => esc(k) + ' (' + rrText(ap[k].rr) + ', ' + esc(fLabel(ap[k].filters, labels)) + ', জয় ' + ap[k].win_rate + '%, ' + ap[k].trades + ' ট্রেড' + (ap[k].per_day ? ', ~' + ap[k].per_day + '/দিন' : '') + ')').join("; ")
-      : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে")
+      : "কোনোটিই পাসেনি; সিগন্যাল আসবে, তবে মান \"দুর্বল/মাঝারি\" দেখাবে")
     + (names.length ? '<br><b>আনুমানিক মোট (ওভারল্যাপসহ):</b> ~' + perDay.toFixed(1) + ' সিগন্যাল/দিন; লাইভে দিনে কোনো সীমা নেই (দরকারে MAX_DAILY_SIGNALS দিন)' : "") + '<br>';
   const cl = (r.closest || []).map(c => esc(c.strategy) + ' (' + rrText(c.rr) + ', ' + esc(fLabel(c.filters, labels)) + ': জয় ' + c.win_rate + '%, ' + c.trades + ' ট্রেড, গড় R ' + c.expectancy_r + ')');
   const clText = cl.length ? '<b>সবচেয়ে বেশি জয়ের হার (লাভজনক সংযোগের মধ্যে): </b>' + cl.join("; ") + '<br>' : "";
@@ -251,14 +263,54 @@ async function loadContext() {
       const cls = { BULLISH: "BUY", BEARISH: "SELL", NEUTRAL: "NEUTRAL" }[b.sentiment] || "NEUTRAL";
       h += '<p><span class="badge ' + cls + '">' + esc(b.sentiment) + '</span> <span class="muted">· ' + esc(b.model) + ' · ইন্টারনেট সার্চ: ' + (b.grounded ? "হ্যাঁ" : "না") + ' · ' + fmtTime(b.generated_at) + '</span></p>'
         + '<p>' + esc(b.summary) + '</p>';
-      if (b.events.length) h += '<p><b>আসন্ন ইভেন্ট:</b><br>' + b.events.map(e => '• ' + fmtTime(e.time) + ' — ' + esc(e.name) + ' <span class="badge ' + (e.impact === "HIGH" ? "SELL" : "OPEN") + '">' + esc(e.impact) + '</span>').join("<br>") + '</p>';
-      if (b.headlines.length) h += '<p class="muted"><b>শিরোনাম:</b><br>' + b.headlines.map(x => '• ' + esc(x)).join("<br>") + '</p>';
+      const o = b.outlook;
+      if (o && (o.text || (o.scenarios || []).length)) {
+        h += '<p><b>পরবর্তী বাজার অবস্থান:</b> <span class="badge ' + ({ BULLISH: "BUY", BEARISH: "SELL" }[o.bias] || "NEUTRAL") + '">' + esc(o.bias) + '</span></p>'
+          + (o.text ? '<p>' + esc(o.text) + '</p>' : '')
+          + (o.scenarios || []).map(x => '<p class="muted">▸ যদি ' + esc(x.if) + ' → ' + esc(x.then) + '</p>').join("")
+          + '<p class="muted" style="font-size:11px">এগুলো সম্ভাবনার হিসাব, নিশ্চয়তা নয়।</p>';
+      }
+      if ((b.events || []).length) h += '<p><b>আসন্ন ইভেন্ট ও সম্ভাব্য ফলাফল:</b><br>' + b.events.map(e => '• ' + fmtTime(e.time) + ' — ' + esc(e.name) + ' <span class="badge ' + (e.impact === "HIGH" ? "SELL" : "OPEN") + '">' + esc(e.impact) + '</span>'
+        + (e.consensus ? ' <span class="muted">· প্রত্যাশা ' + esc(e.consensus) + '</span>' : '') + (e.previous ? ' <span class="muted">· আগের ' + esc(e.previous) + '</span>' : '')
+        + (e.forecast ? '<br><span class="muted">→ ' + esc(e.forecast) + '</span>' : '')).join("<br>") + '</p>';
+      if ((b.recent_events || []).length) h += '<p><b>সাম্প্রতিক ইভেন্টের ফলাফল:</b><br>' + b.recent_events.map(e => '• ' + fmtTime(e.time) + ' — ' + esc(e.name)
+        + (e.actual ? ' <span class="muted">· আসল ' + esc(e.actual) + (e.consensus ? ' (প্রত্যাশা ' + esc(e.consensus) + ')' : '') + '</span>' : '')
+        + (e.reaction ? '<br><span class="muted">→ ' + esc(e.reaction) + '</span>' : '')).join("<br>") + '</p>';
+      if ((b.headlines || []).length) h += '<p class="muted"><b>শিরোনাম:</b><br>' + b.headlines.map(x => '• ' + esc(x)).join("<br>") + '</p>';
     } else {
       h += '<p class="muted">খবর ও ইভেন্টের ব্রিফ এখনো আসেনি' + (c.brief_error ? ' (' + esc(c.brief_error) + ')' : '') + '। "এখনই AI চালাও" চাপুন।</p>';
     }
     $("ctx").innerHTML = h;
   } catch (e) {
     $("ctx").textContent = "লোড করা যায়নি";
+  }
+}
+async function loadNewsHistory() {
+  try {
+    const d = await getJSON("/api/ai/news/history?limit=30");
+    const SENT = { BULLISH: "BUY", BEARISH: "SELL" };
+    let h = "";
+    if (d.events.length) {
+      h += '<div class="scroll"><table><thead><tr><th>সময়</th><th>ইভেন্ট</th><th>গুরুত্ব</th><th>প্রত্যাশা</th><th>আসল ফল</th><th>বাজারে প্রভাব / পূর্বাভাস</th></tr></thead><tbody>'
+        + d.events.map(e => '<tr><td>' + fmtTime(e.time) + '</td><td style="white-space:normal;min-width:160px">' + esc(e.name) + '</td>'
+          + '<td>' + (e.impact === "-" ? "-" : '<span class="badge ' + (e.impact === "HIGH" ? "SELL" : "OPEN") + '">' + esc(e.impact) + '</span>') + '</td>'
+          + '<td>' + esc(e.consensus || "-") + '</td><td>' + esc(e.actual || "-") + '</td>'
+          + '<td style="white-space:normal;min-width:240px">' + esc(e.reaction || e.forecast || "-") + '</td></tr>').join("")
+        + '</tbody></table></div>';
+    } else {
+      h += '<p class="muted">এখনো কোনো পুরনো ইভেন্ট জমা হয়নি। প্রতিটা নতুন ব্রিফ থেকে ইভেন্টগুলো এখানে জমতে থাকবে।</p>';
+    }
+    if (d.briefs.length) {
+      h += '<p style="margin-top:12px"><b>আগের ব্রিফ:</b></p>' + d.briefs.map(b =>
+        '<details style="margin:6px 0"><summary>' + fmtTime(b.generated_at) + ' · <span class="badge ' + (SENT[b.sentiment] || "NEUTRAL") + '">' + esc(b.sentiment) + '</span></summary>'
+        + '<p>' + esc(b.summary) + '</p>'
+        + ((b.headlines || []).length ? '<p class="muted">' + b.headlines.map(x => '• ' + esc(x)).join("<br>") + '</p>' : '')
+        + (b.outlook && b.outlook.text ? '<p class="muted">অবস্থান (' + esc(b.outlook.bias) + '): ' + esc(b.outlook.text) + '</p>' : '')
+        + '</details>').join("");
+    }
+    $("news-hist").innerHTML = h;
+  } catch (e) {
+    $("news-hist").textContent = "লোড করা যায়নি";
   }
 }
 async function loadReviews() {
@@ -326,7 +378,7 @@ $("run").addEventListener("click", async () => {
   } catch (e) { $("msg").textContent = "ব্যর্থ: " + e.message; }
   b.disabled = false;
 });
-load(); loadBacktest(); loadTelegram(); setInterval(load, 30000);
+load(); loadBacktest(); loadTelegram(); loadNewsHistory(); setInterval(load, 30000); setInterval(loadNewsHistory, 300000);
 </script>
 </body>
 </html>

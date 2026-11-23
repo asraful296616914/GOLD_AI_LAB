@@ -15,7 +15,7 @@ MANUAL_BRIEF_TTL = 10 * 60
 BLACKOUT_BEFORE = 20 * 60
 BLACKOUT_AFTER = 30 * 60
 MAX_REVIEWS_PER_CYCLE = 4
-STATE = {"brief": None, "brief_at": 0, "brief_error": None, "context": None, "reviews_ready": False}
+STATE = {"brief": None, "brief_at": 0, "brief_error": None, "context": None, "reviews_ready": False, "restored": False}
 
 DDL_REVIEWS = (
     "CREATE TABLE IF NOT EXISTS ai_reviews ("
@@ -127,33 +127,126 @@ def _event_time(value):
         return None
 
 
+def _txt(value, limit):
+    return str(value or "").strip()[:limit]
+
+
 def normalize_brief(parsed, now, grounded, model):
-    events = []
-    headlines = []
+    events, recent, headlines = [], [], []
     if grounded:
         for event in (parsed.get("events") or [])[:10]:
+            if not isinstance(event, dict):
+                continue
             ts = _event_time(event.get("time_utc"))
             impact = str(event.get("impact", "")).upper()
             if ts is None or impact not in ("HIGH", "MEDIUM", "LOW"):
                 continue
             if now - 2 * 3600 <= ts <= now + 72 * 3600:
-                events.append({"time": ts, "name": str(event.get("name", ""))[:80], "impact": impact})
+                events.append({
+                    "time": ts, "name": _txt(event.get("name"), 80), "impact": impact,
+                    "consensus": _txt(event.get("consensus"), 40), "previous": _txt(event.get("previous"), 40),
+                    "forecast": _txt(event.get("forecast_bn"), 260),
+                })
+        for event in (parsed.get("recent_events") or [])[:8]:
+            if not isinstance(event, dict):
+                continue
+            ts = _event_time(event.get("time_utc"))
+            if ts is None or not (now - 36 * 3600 <= ts <= now + 3600):
+                continue
+            recent.append({
+                "time": ts, "name": _txt(event.get("name"), 80), "actual": _txt(event.get("actual"), 40),
+                "consensus": _txt(event.get("consensus"), 40), "reaction": _txt(event.get("reaction_bn"), 260),
+            })
         headlines = [str(h)[:160] for h in (parsed.get("headlines") or [])[:5]]
         events.sort(key=lambda e: e["time"])
+        recent.sort(key=lambda e: e["time"], reverse=True)
     sentiment = str(parsed.get("sentiment", "NEUTRAL")).upper()
     if sentiment not in ("BULLISH", "BEARISH", "NEUTRAL"):
         sentiment = "NEUTRAL"
     summary = str(parsed.get("summary_bn", ""))[:900]
     if not grounded:
         summary = "(ইন্টারনেট সার্চ ছাড়া, খবর ও ইভেন্ট যাচাই করা যায়নি) " + summary
+    raw_outlook = parsed.get("outlook") if isinstance(parsed.get("outlook"), dict) else {}
+    bias = str(raw_outlook.get("bias", "NEUTRAL")).upper()
+    if bias not in ("BULLISH", "BEARISH", "NEUTRAL", "RANGE"):
+        bias = "NEUTRAL"
+    scenarios = []
+    for item in (raw_outlook.get("scenarios") or [])[:3]:
+        if isinstance(item, dict) and (item.get("if_bn") or item.get("then_bn")):
+            scenarios.append({"if": _txt(item.get("if_bn"), 160), "then": _txt(item.get("then_bn"), 220)})
     return {
-        "sentiment": sentiment, "summary": summary, "events": events, "headlines": headlines,
-        "grounded": grounded, "model": model, "generated_at": now,
+        "sentiment": sentiment, "summary": summary, "events": events, "recent_events": recent,
+        "headlines": headlines, "grounded": grounded, "model": model, "generated_at": now,
+        "outlook": {"bias": bias, "text": _txt(raw_outlook.get("next_hours_bn"), 500), "scenarios": scenarios},
     }
+
+
+async def load_last_brief():
+    from app import signals as sg
+
+    STATE["restored"] = True
+    try:
+        rows = await asyncio.to_thread(sg.db_rows, "SELECT data FROM ai_briefs ORDER BY id DESC LIMIT 1")
+        if rows:
+            brief = json.loads(rows[0]["data"])
+            STATE["brief"], STATE["brief_at"] = brief, int(brief.get("generated_at") or 0)
+    except Exception:
+        logger.exception("Could not restore the last brief")
+
+
+async def save_brief(brief):
+    from app import signals as sg
+
+    try:
+        await asyncio.to_thread(
+            sg.db_exec, "INSERT INTO ai_briefs (created_at, data) VALUES (:created_at, :data)",
+            {"created_at": brief["generated_at"], "data": json.dumps(brief, ensure_ascii=False)},
+        )
+        await asyncio.to_thread(
+            sg.db_exec, "DELETE FROM ai_briefs WHERE created_at < :cutoff", {"cutoff": brief["generated_at"] - 90 * 86400}
+        )
+    except Exception:
+        logger.exception("Could not save the brief")
+
+
+async def news_history(limit=20):
+    """Past briefs plus every past economic event (with the forecast we gave and the actual result, if known)."""
+    from app import signals as sg
+
+    rows = await asyncio.to_thread(
+        sg.db_rows, "SELECT data FROM ai_briefs ORDER BY id DESC LIMIT :limit", {"limit": max(1, min(60, limit))}
+    )
+    briefs = []
+    for row in rows:
+        try:
+            briefs.append(json.loads(row["data"]))
+        except Exception:
+            continue
+    now = int(time.time())
+    items = {}
+    for brief in reversed(briefs):
+        for e in brief.get("events") or []:
+            item = items.setdefault((e["name"].lower(), e["time"] // 3600), {"time": e["time"], "name": e["name"], "impact": e.get("impact", "-")})
+            for key in ("consensus", "previous", "forecast"):
+                item[key] = e.get(key) or item.get(key, "")
+        for e in brief.get("recent_events") or []:
+            item = items.setdefault((e["name"].lower(), e["time"] // 3600), {"time": e["time"], "name": e["name"], "impact": "-"})
+            for key in ("actual", "reaction"):
+                item[key] = e.get(key) or item.get(key, "")
+            item["consensus"] = e.get("consensus") or item.get("consensus", "")
+    past = sorted((i for i in items.values() if i["time"] <= now), key=lambda i: i["time"], reverse=True)[:40]
+    slim = [
+        {"generated_at": b.get("generated_at"), "sentiment": b.get("sentiment"), "summary": b.get("summary"),
+         "headlines": b.get("headlines") or [], "outlook": b.get("outlook"), "grounded": b.get("grounded")}
+        for b in briefs
+    ]
+    return {"briefs": slim, "events": past}
 
 
 async def get_brief(force=False, now=None):
     now = now or int(time.time())
+    if not STATE["restored"] and not STATE["brief"]:
+        await load_last_brief()
     ttl = MANUAL_BRIEF_TTL if force else BRIEF_TTL
     if STATE["brief"] and now - STATE["brief_at"] < ttl:
         return STATE["brief"]
@@ -162,13 +255,21 @@ async def get_brief(force=False, now=None):
     prompt = (
         f"Now is {date}. Use Google Search to find CURRENT information relevant to gold (XAU/USD). "
         "Find: (1) high and medium impact economic events (US data, Fed speakers, central banks) scheduled in the "
-        "next 48 hours with exact UTC time; (2) the 3-5 latest headlines moving gold (Fed rate expectations, US dollar, "
-        "bond yields, geopolitics, central bank buying); (3) the overall bias. "
-        "Never invent anything: if you cannot verify an item, leave it out and use empty arrays. "
+        "next 48 hours with exact UTC time, plus for each the consensus and previous value if known and a short "
+        "expectation of how gold would likely react if the result comes above or below consensus (a scenario, not a certainty); "
+        "(2) events RELEASED in the last 24 hours with the actual result versus consensus and how gold reacted; "
+        "(3) the 3-5 latest headlines moving gold (Fed rate expectations, US dollar, bond yields, geopolitics, central bank buying); "
+        "(4) an outlook for gold over the next 4-24 hours with 2-3 if-then scenarios, based only on the verified information. "
+        "Never invent anything: if you cannot verify an item, leave it out and use empty arrays or empty strings. "
         'Return ONLY a JSON object: {"sentiment": "BULLISH|BEARISH|NEUTRAL", '
         '"summary_bn": "3-4 short sentences in Bengali", '
-        '"events": [{"time_utc": "YYYY-MM-DDTHH:MM", "name": "...", "impact": "HIGH|MEDIUM"}], '
-        '"headlines": ["short English headline (source)"]}. Educational context, not financial advice.'
+        '"events": [{"time_utc": "YYYY-MM-DDTHH:MM", "name": "...", "impact": "HIGH|MEDIUM", '
+        '"consensus": "", "previous": "", "forecast_bn": "1-2 short Bengali sentences"}], '
+        '"recent_events": [{"time_utc": "YYYY-MM-DDTHH:MM", "name": "...", "actual": "", "consensus": "", '
+        '"reaction_bn": "1-2 short Bengali sentences"}], '
+        '"headlines": ["short English headline (source)"], '
+        '"outlook": {"bias": "BULLISH|BEARISH|NEUTRAL|RANGE", "next_hours_bn": "2-3 short Bengali sentences", '
+        '"scenarios": [{"if_bn": "...", "then_bn": "..."}]}}. Educational context, not financial advice.'
     )
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -191,6 +292,7 @@ async def get_brief(force=False, now=None):
     STATE["brief"] = normalize_brief(parsed, now, result["grounded"], result["model"])
     STATE["brief_at"] = now
     STATE["brief_error"] = None
+    await save_brief(STATE["brief"])
     return STATE["brief"]
 
 

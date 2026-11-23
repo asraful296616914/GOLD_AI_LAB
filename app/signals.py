@@ -42,7 +42,7 @@ MAX_DAILY_SIGNALS = int(os.getenv("MAX_DAILY_SIGNALS", "0"))
 MIN_GAP_SECONDS = int(os.getenv("MIN_SIGNAL_GAP_MINUTES", "0")) * 60
 MARKET_STALE_SECONDS = 4 * 3600
 SL_ATR = 1.5
-QUALITY_GATE = os.getenv("QUALITY_GATE", "1") == "1"
+STRICT_GATE = os.getenv("STRICT_GATE", "0") == "1"
 TP_ATR = 3.0
 TIMEFRAMES = ("15", "60", "240")
 TF_LABEL = {"5": "M5", "15": "M15", "60": "H1", "240": "H4"}
@@ -85,6 +85,12 @@ DDL = [
         summary TEXT,
         risk_note TEXT
     )""",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS accuracy DOUBLE PRECISION",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS win_sample INTEGER",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS quality TEXT",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS accuracy_note TEXT",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS ai_verdict TEXT",
+    "CREATE TABLE IF NOT EXISTS ai_briefs (id BIGSERIAL PRIMARY KEY, created_at BIGINT NOT NULL, data TEXT NOT NULL)",
 ]
 
 
@@ -119,10 +125,13 @@ def insert_signal(row):
         connection.execute(
             text(
                 "INSERT INTO ai_signals (created_at, strategy, symbol, timeframe, direction, entry, "
-                "stop_loss, take_profit, confidence, reason) VALUES (:created_at, :strategy, :symbol, "
-                ":timeframe, :direction, :entry, :stop_loss, :take_profit, :confidence, :reason)"
+                "stop_loss, take_profit, confidence, reason, accuracy, win_sample, quality, accuracy_note, ai_verdict) "
+                "VALUES (:created_at, :strategy, :symbol, :timeframe, :direction, :entry, :stop_loss, :take_profit, "
+                ":confidence, :reason, :accuracy, :win_sample, :quality, :accuracy_note, :ai_verdict)"
             ),
-            row,
+            {key: row.get(key) for key in (
+                "created_at", "strategy", "symbol", "timeframe", "direction", "entry", "stop_loss", "take_profit",
+                "confidence", "reason", "accuracy", "win_sample", "quality", "accuracy_note", "ai_verdict")},
         )
         return True
 
@@ -317,20 +326,27 @@ async def publish(row, context, diag=None):
             MIN_GAP_SECONDS and last_at and time.time() - last_at < MIN_GAP_SECONDS
         ):
             return skip("skipped_daily_limit_or_gap")
-    if context and context.get("blackout"):
-        event = context["blackout"]
+    note = row.get("reason", "")
+    event = (context or {}).get("blackout")
+    if event:
         await analyst.log_review(row, "BLOCKED", 0, "বড় ইভেন্টের কাছাকাছি সময়: " + event["name"])
-        return skip("skipped_news_blackout")
+        if STRICT_GATE:
+            return skip("skipped_news_blackout")
+        note += " | ⚠ বড় ইভেন্টের কাছাকাছি: " + event["name"]
     verdict = await analyst.review(row, context) if context else None
-    if verdict:
-        if verdict["verdict"] != "APPROVE":
-            return skip("ai_review_" + str(verdict["verdict"]).lower())
-        row = {
-            **row, "confidence": verdict["confidence"],
-            "reason": (row.get("reason", "") + " | AI যাচাই: " + verdict["reason"])[:400],
-        }
+    ai_verdict = None
+    if verdict and verdict["verdict"] in ("APPROVE", "REJECT", "WAIT"):
+        ai_verdict = verdict["verdict"]
+        if STRICT_GATE and ai_verdict != "APPROVE":
+            return skip("ai_review_" + ai_verdict.lower())
+        note += " | AI যাচাই (" + ai_verdict + "): " + verdict["reason"]
+        if ai_verdict == "APPROVE":
+            row = {**row, "confidence": verdict["confidence"]}
     else:
-        row = {**row, "reason": (row.get("reason", "") + " | (AI যাচাই হয়নি)")[:400]}
+        if STRICT_GATE and verdict:
+            return skip("ai_review_" + str(verdict["verdict"]).lower())
+        note += " | (AI যাচাই হয়নি)"
+    row = {**row, "reason": note[:400], "ai_verdict": ai_verdict}
     added = await asyncio.to_thread(insert_signal, row)
     if added:
         asyncio.create_task(notify.notify_new(row))
@@ -339,15 +355,14 @@ async def publish(row, context, diag=None):
     return added
 
 
-async def load_approved(tf=None):
+async def load_bt(tf=None):
+    """Latest saved backtest for this timeframe: approved strategies + every strategy's variant stats."""
     tf = tf or STRAT_TF
-    if not QUALITY_GATE:
-        return None
-    caches = STATE.setdefault("approved_cache", {})
+    caches = STATE.setdefault("bt_cache", {})
     cached = caches.get(tf)
     if cached and time.time() - cached[0] < 300:
         return cached[1]
-    value = {}
+    value = {"approved": {}, "strategies": {}, "tf_label": TF_LABEL.get(tf, tf), "generated_at": None}
     try:
         await asyncio.to_thread(db_exec, backtest.DDL)
         rows = await asyncio.to_thread(
@@ -359,11 +374,89 @@ async def load_approved(tf=None):
             result = json.loads(rows[0]["result"])
             strategies = result.get("strategies") or []
             if strategies and "variants" in strategies[0]:
-                value = backtest.compute_approved(strategies)
+                value["approved"] = backtest.compute_approved(strategies, result.get("trading_days"))
+                value["strategies"] = {row["strategy"]: row["variants"] for row in strategies}
+                value["generated_at"] = result.get("generated_at")
     except Exception:
-        logger.exception("Could not load approved strategies")
+        logger.exception("Could not load backtest")
     caches[tf] = (time.time(), value)
     return value
+
+
+UNKNOWN_EST = {
+    "accuracy": None, "win_sample": 0, "quality": "UNKNOWN", "expectancy_r": 0,
+    "accuracy_note": "এই কৌশলের ব্যাকটেস্ট ডেটা এখনো নেই (অটো ব্যাকটেস্ট চলছে, কিছুক্ষণ পর আসবে)",
+}
+
+
+def estimate(item, bt, flag_set, vetted):
+    """Expected win rate of this setup, from the backtest of the same strategy under today's conditions."""
+    variants = (bt.get("strategies") or {}).get(item["strategy"])
+    if not variants:
+        return None
+    rule = (bt.get("approved") or {}).get(item["strategy"])
+    direction = item["direction"]
+    if vetted and rule:
+        fid, rr_str = rule["fid"], str(rule["rr"])
+    else:
+        risk = abs(item["entry"] - item["stop_loss"])
+        rr_now = abs(item["take_profit"] - item["entry"]) / risk if risk else 2.0
+        rr_str = str(min(backtest.RR_LIST, key=lambda x: abs(x - rr_now)))
+        picks = []
+        for key, v in variants.items():
+            fid_, rr_ = key.split("|")
+            a = v["all"]
+            if rr_ != rr_str or a["trades"] < 20 or a["win_rate"] is None:
+                continue
+            ids = filters.ids(fid_)
+            if flag_set is None and ids:
+                continue
+            if flag_set is not None and not filters.passes(ids, flag_set, direction):
+                continue
+            picks.append((len(ids), a["trades"], fid_))
+        if not picks:
+            return None
+        fid = max(picks)[2]
+    stats = (variants.get(f"{fid}|{rr_str}") or {}).get("all")
+    if not stats or stats["win_rate"] is None:
+        return None
+    win, trades, exp = stats["win_rate"], stats["trades"], stats.get("expectancy_r") or 0
+    if vetted:
+        quality = "STRONG"
+    elif win >= 50 and exp > 0 and trades >= 30:
+        quality = "OK"
+    else:
+        quality = "WEAK"
+    timeout = round(stats["expired"] / trades * 100) if trades else 0
+    note = (
+        f"ব্যাকটেস্ট ({bt.get('tf_label', '')} · {backtest.rr_label(backtest.parse_rr(rr_str))} · {filters.LABELS[fid]}): "
+        f"জয় {win}% · {trades} ট্রেড · গড় R {exp:+.2f} · টাইমআউট {timeout}% · "
+        + ("অনুমোদিত কৌশল" if vetted else "অনুমোদন পায়নি, সাবধান")
+    )
+    return {"accuracy": win, "win_sample": trades, "quality": quality, "accuracy_note": note, "expectancy_r": exp}
+
+
+async def live_estimate(strategy):
+    """For strategies that cannot be backtested (Gemini): accuracy from their own closed live signals."""
+    wins = losses = 0
+    try:
+        rows = await asyncio.to_thread(
+            db_rows,
+            "SELECT COUNT(*) FILTER (WHERE status='WIN') AS wins, COUNT(*) FILTER (WHERE status='LOSS') AS losses "
+            "FROM ai_signals WHERE strategy=:s",
+            {"s": strategy},
+        )
+        if rows:
+            wins, losses = int(rows[0]["wins"]), int(rows[0]["losses"])
+    except Exception:
+        logger.exception("Live estimate failed")
+    decided = wins + losses
+    if decided < 5:
+        return {"accuracy": None, "win_sample": decided, "quality": "UNKNOWN",
+                "accuracy_note": f"এই কৌশল ব্যাকটেস্ট করা যায় না; লাইভ ফল এখনো কম ({decided}টি)"}
+    win = round(wins / decided * 100, 1)
+    return {"accuracy": win, "win_sample": decided, "quality": "OK" if win >= 50 else "WEAK",
+            "accuracy_note": f"লাইভ রেকর্ড: জয় {win}% ({decided} ট্রেড); ব্যাকটেস্ট নেই"}
 
 
 def gate_item(item, approved, flag_set, level_ctx=None, diag=None):
@@ -511,17 +604,25 @@ async def run_cycle(auto=False, light=False):
             "raw_signals": 0, "passed_quality_gate": 0,
         }
 
-        def collect(raw_item, approved, flag_set, level_ctx, label):
+        def collect(raw_item, bt, flag_set, level_ctx, label):
             diag["raw_signals"] += 1
-            item = gate_item(raw_item, approved, flag_set, level_ctx, diag)
-            if item:
+            unapproved = diag.setdefault("unapproved_reasons", {})
+            item = gate_item(raw_item, bt["approved"], flag_set, level_ctx, diag if STRICT_GATE else unapproved)
+            vetted = item is not None
+            if vetted:
                 diag["passed_quality_gate"] += 1
-                score = ((approved or {}).get(item["strategy"]) or {}).get("expectancy_r") or 0
-                pool.append((score, {
-                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": label,
-                    "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
-                    "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
-                }))
+            elif STRICT_GATE:
+                return
+            else:
+                item = raw_item
+            est = estimate(item, bt, flag_set, vetted) or UNKNOWN_EST
+            pool.append((est.get("expectancy_r") or 0, {
+                "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": label,
+                "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
+                "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
+                "accuracy": est["accuracy"], "win_sample": est["win_sample"], "quality": est["quality"],
+                "accuracy_note": est["accuracy_note"],
+            }))
 
         if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and base_atr:
             sl, tp = build_levels(gemini["direction"], base_price, base_atr)
@@ -530,6 +631,7 @@ async def run_cycle(auto=False, light=False):
                 "direction": gemini["direction"], "entry": base_price, "stop_loss": sl, "take_profit": tp,
                 "confidence": gemini["confidence"], "reason": gemini["summary"][:400],
             }
+            gemini_row.update(await live_estimate("GEMINI_V1"))
             if await asyncio.to_thread(insert_signal, gemini_row):
                 created.append("GEMINI_V1")
                 asyncio.create_task(notify.notify_new(gemini_row))
@@ -543,8 +645,8 @@ async def run_cycle(auto=False, light=False):
                 continue
             htf = candles.get("60") if tf in ("5", "15") else candles.get("240")
             label = TF_LABEL.get(tf, tf)
-            approved = await load_approved(tf)
-            diag["approved_strategies"][label] = sorted(approved) if approved is not None else "gate_off"
+            bt = await load_bt(tf)
+            diag["approved_strategies"][label] = sorted(bt["approved"])
             try:
                 flag_set = filters.flags(m, base, htf, tf_atr, base[-1]["time"])
             except Exception:
@@ -559,11 +661,11 @@ async def run_cycle(auto=False, light=False):
                     "strategy": "RULES_V1", "direction": tf_rule["direction"], "entry": base[-1]["close"],
                     "stop_loss": sl, "take_profit": tp, "confidence": tf_rule["confidence"],
                     "reason": "; ".join(tf_rule["reasons"]),
-                }, approved, flag_set, level_ctx, label)
+                }, bt, flag_set, level_ctx, label)
 
             try:
                 for raw_item in smc.analyze(base, tf_atr, htf)["signals"]:
-                    collect(raw_item, approved, flag_set, level_ctx, label)
+                    collect(raw_item, bt, flag_set, level_ctx, label)
             except Exception:
                 logger.exception("SMC analysis failed")
 
@@ -572,7 +674,7 @@ async def run_cycle(auto=False, light=False):
                     *classic.analyze(m, base, tf_atr), *classic2.analyze(m, base, tf_atr),
                     *patterns.analyze(m, base, tf_atr),
                 ]:
-                    collect(raw_item, approved, flag_set, level_ctx, label)
+                    collect(raw_item, bt, flag_set, level_ctx, label)
             except Exception:
                 logger.exception("Classic strategies failed")
 
@@ -609,6 +711,8 @@ async def start_background():
     except Exception:
         logger.exception("Could not create AI tables")
         return
+    if backtest.AUTO:
+        asyncio.create_task(backtest.auto_loop(list(dict.fromkeys(LIVE_TFS))))
     if AI_AUTO:
         asyncio.create_task(auto_loop())
 
@@ -629,10 +733,11 @@ def ai_status():
         "last_run": STATE["last_run"],
         "last_error": STATE["last_error"],
         "market_closed": STATE["market_closed"],
-        "quality_gate": QUALITY_GATE,
+        "strict_gate": STRICT_GATE,
+        "backtest_auto_hours": backtest.AUTO_HOURS if backtest.AUTO else None,
         "approved": {
-            TF_LABEL.get(tf, tf): sorted(entry[1] or {})
-            for tf, entry in (STATE.get("approved_cache") or {}).items()
+            TF_LABEL.get(tf, tf): sorted(entry[1]["approved"])
+            for tf, entry in (STATE.get("bt_cache") or {}).items()
         },
         "last_diag": STATE.get("last_diag"),
     }
@@ -776,7 +881,14 @@ async def ai_smc_zones():
 
 @router.get("/api/ai/context")
 async def ai_context():
+    if not analyst.STATE["brief"] and not analyst.STATE["restored"]:
+        await analyst.load_last_brief()
     return analyst.public_context()
+
+
+@router.get("/api/ai/news/history")
+async def ai_news_history(limit: int = Query(20, ge=1, le=60)):
+    return await analyst.news_history(limit)
 
 
 @router.get("/api/ai/reviews")
