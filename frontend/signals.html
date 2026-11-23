@@ -38,6 +38,22 @@ th{color:var(--muted);font-weight:600}
 <div class="muted" id="status">লোড হচ্ছে...</div>
 <div id="msg" class="muted" style="margin:6px 0 12px"></div>
 
+<div class="card"><h2>টেলিগ্রাম নোটিফিকেশন</h2>
+  <div class="muted" id="tg-status" style="margin-bottom:8px">লোড হচ্ছে...</div>
+  <div style="display:grid;gap:8px;max-width:520px">
+    <input id="tg-token" type="password" autocomplete="off" placeholder="বট টোকেন (BotFather থেকে)" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:10px">
+    <input id="tg-chat" type="text" autocomplete="off" placeholder="চ্যাট আইডি (যেমন 123456789 বা @চ্যানেল)" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:10px">
+    <input id="tg-admin" type="password" autocomplete="off" placeholder="অ্যাডমিন কী" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:10px;display:none">
+    <label class="muted"><input id="tg-enabled" type="checkbox" checked> নোটিফিকেশন চালু</label>
+    <label class="muted"><input id="tg-new" type="checkbox" checked> নতুন সিগন্যাল পাঠাও</label>
+    <label class="muted"><input id="tg-result" type="checkbox" checked> ফলাফল পাঠাও (TP / SL / সময় শেষ)</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="tg-save">সংরক্ষণ</button><button id="tg-test">টেস্ট মেসেজ</button><button id="tg-clear" style="background:#ef4444;color:#fff">সংযোগ মুছুন</button>
+    </div>
+    <div class="muted" id="tg-msg"></div>
+  </div>
+  <div class="muted" style="margin-top:8px">কীভাবে: ১) টেলিগ্রামে @BotFather থেকে বট বানিয়ে টোকেন নিন। ২) নিজের বটকে একবার /start পাঠান। ৩) @userinfobot থেকে নিজের চ্যাট আইডি নিন (গ্রুপ হলে বটকে গ্রুপে যোগ করুন)। টোকেন সার্ভারে সংরক্ষিত থাকে, এখানে আর দেখানো হয় না। পাবলিক সাইটে অন্য কেউ যাতে বদলাতে না পারে, Railway Variables-এ ADMIN_KEY দিন।</div>
+</div>
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>বাজারের পটভূমি (সেশন, খবর, ইকোনমিক ইভেন্ট)</h2><div id="ctx" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
@@ -191,7 +207,7 @@ function renderBacktest(r) {
   const apText = '<b>লাইভে অনুমোদিত (জয় ≥ ' + r.min_win + '%, দুই অর্ধেকেই লাভজনক): </b>'
     + (names.length ? names.map(k => esc(k) + ' (' + rrText(ap[k].rr) + ', ' + esc(fLabel(ap[k].filters, labels)) + ', জয় ' + ap[k].win_rate + '%, ' + ap[k].trades + ' ট্রেড' + (ap[k].per_day ? ', ~' + ap[k].per_day + '/দিন' : '') + ')').join("; ")
       : "কোনোটিই পাসেনি, তাই নতুন স্ট্র্যাটেজি সিগন্যাল বন্ধ থাকবে")
-    + (names.length ? '<br><b>আনুমানিক মোট (ওভারল্যাপসহ):</b> ~' + perDay.toFixed(1) + ' সিগন্যাল/দিন; লাইভে দৈনিক সীমা প্রযোজ্য (ডিফল্ট ২টা)' : "") + '<br>';
+    + (names.length ? '<br><b>আনুমানিক মোট (ওভারল্যাপসহ):</b> ~' + perDay.toFixed(1) + ' সিগন্যাল/দিন; লাইভে দিনে কোনো সীমা নেই (দরকারে MAX_DAILY_SIGNALS দিন)' : "") + '<br>';
   const cl = (r.closest || []).map(c => esc(c.strategy) + ' (' + rrText(c.rr) + ', ' + esc(fLabel(c.filters, labels)) + ': জয় ' + c.win_rate + '%, ' + c.trades + ' ট্রেড, গড় R ' + c.expectancy_r + ')');
   const clText = cl.length ? '<b>সবচেয়ে বেশি জয়ের হার (লাভজনক সংযোগের মধ্যে): </b>' + cl.join("; ") + '<br>' : "";
   $("bt-note").innerHTML = apText + clText + r.assumptions.map(x => "• " + esc(x)).join("<br>");
@@ -253,6 +269,47 @@ async function loadReviews() {
     ).join("") : '<tr><td colspan="6" class="muted">এখনো কোনো যাচাই নেই</td></tr>';
   } catch (e) {}
 }
+async function postJSON(url, body) {
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    return { ok: r.ok, data };
+  } catch (e) {
+    return { ok: false, data: { detail: "সার্ভারের সাথে সংযোগ হয়নি" } };
+  }
+}
+const tgBody = () => ({
+  token: $("tg-token").value.trim(), chat_id: $("tg-chat").value.trim(), admin_key: $("tg-admin").value,
+  enabled: $("tg-enabled").checked, notify_new: $("tg-new").checked, notify_result: $("tg-result").checked
+});
+function tgRender(d) {
+  $("tg-status").textContent = d.configured
+    ? "সংযুক্ত · টোকেন " + d.token_hint + " · চ্যাট " + d.chat_id + " · " + (d.enabled ? "চালু" : "বন্ধ")
+    : "এখনো সংযুক্ত নয়";
+  if (document.activeElement !== $("tg-chat")) $("tg-chat").value = d.chat_id || "";
+  $("tg-enabled").checked = d.enabled; $("tg-new").checked = d.notify_new; $("tg-result").checked = d.notify_result;
+  $("tg-admin").style.display = d.admin_protected ? "block" : "none";
+}
+async function loadTelegram() {
+  try { tgRender(await getJSON("/api/ai/telegram")); } catch (e) { $("tg-status").textContent = "লোড করা যায়নি"; }
+}
+$("tg-save").addEventListener("click", async () => {
+  $("tg-msg").textContent = "সংরক্ষণ হচ্ছে...";
+  const { ok, data } = await postJSON("/api/ai/telegram/save", tgBody());
+  if (ok) { $("tg-token").value = ""; tgRender(data); $("tg-msg").textContent = "সংরক্ষিত। এবার টেস্ট মেসেজ পাঠিয়ে দেখুন।"; }
+  else $("tg-msg").textContent = "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+});
+$("tg-test").addEventListener("click", async () => {
+  $("tg-msg").textContent = "পাঠানো হচ্ছে...";
+  const { ok, data } = await postJSON("/api/ai/telegram/test", { admin_key: $("tg-admin").value });
+  $("tg-msg").textContent = ok ? (data.ok ? "টেস্ট মেসেজ গেছে, টেলিগ্রাম দেখুন ✓" : "ব্যর্থ: " + data.error) : "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+});
+$("tg-clear").addEventListener("click", async () => {
+  if (!confirm("টোকেন ও চ্যাট আইডি মুছে ফেলবেন?")) return;
+  const { ok, data } = await postJSON("/api/ai/telegram/clear", { admin_key: $("tg-admin").value });
+  if (ok) { tgRender(data); $("tg-msg").textContent = "মুছে ফেলা হয়েছে"; } else $("tg-msg").textContent = "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+});
 $("run").addEventListener("click", async () => {
   const b = $("run"); b.disabled = true; $("msg").textContent = "AI বিশ্লেষণ চলছে...";
   try {
@@ -267,7 +324,7 @@ $("run").addEventListener("click", async () => {
   } catch (e) { $("msg").textContent = "ব্যর্থ: " + e.message; }
   b.disabled = false;
 });
-load(); loadBacktest(); setInterval(load, 30000);
+load(); loadBacktest(); loadTelegram(); setInterval(load, 30000);
 </script>
 </body>
 </html>
