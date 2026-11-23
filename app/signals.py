@@ -16,6 +16,7 @@ from app import classic
 from app import classic2
 from app import patterns
 from app import levels
+from app import notify
 from app import filters
 from app import analyst
 from app import backtest
@@ -23,6 +24,7 @@ from app import backtest
 logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
 router.include_router(backtest.router)
+router.include_router(notify.router)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 GEMINI_FALLBACKS = [
@@ -34,16 +36,21 @@ AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
 AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "15")))
 MANUAL_GAP_SECONDS = 120
 EXPIRE_SECONDS = 3 * 3600
-MAX_DAILY_SIGNALS = int(os.getenv("MAX_DAILY_SIGNALS", "2"))
-MIN_GAP_SECONDS = int(os.getenv("MIN_SIGNAL_GAP_MINUTES", "60")) * 60
+MAX_DAILY_SIGNALS = int(os.getenv("MAX_DAILY_SIGNALS", "0"))
+MIN_GAP_SECONDS = int(os.getenv("MIN_SIGNAL_GAP_MINUTES", "0")) * 60
 MARKET_STALE_SECONDS = 4 * 3600
 SL_ATR = 1.5
 QUALITY_GATE = os.getenv("QUALITY_GATE", "1") == "1"
 TP_ATR = 3.0
 TIMEFRAMES = ("15", "60", "240")
 TF_LABEL = {"5": "M5", "15": "M15", "60": "H1", "240": "H4"}
-STRAT_TF = os.getenv("STRAT_TF", "15") if os.getenv("STRAT_TF", "15") in ("5", "15", "60") else "15"
-STRAT_WINDOW = {"5": 400, "15": 200, "60": 160}[STRAT_TF]
+LIVE_TFS = [
+    tf for tf in os.getenv("STRAT_TFS", os.getenv("STRAT_TF", "15,5")).replace(" ", "").split(",")
+    if tf in ("5", "15", "60")
+] or ["15"]
+STRAT_TF = LIVE_TFS[0]
+STRAT_WINDOW = {"5": 400, "15": 200, "60": 160}
+SCAN_SECONDS = max(60, int(os.getenv("SCAN_MINUTES", "5")) * 60)
 PAPER_START_BALANCE = float(os.getenv("PAPER_START_BALANCE", "10000"))
 PAPER_RISK_PCT = float(os.getenv("PAPER_RISK_PCT", "1"))
 
@@ -99,10 +106,11 @@ def insert_signal(row):
     with engine.begin() as connection:
         duplicate = connection.execute(
             text(
-                "SELECT 1 FROM ai_signals WHERE strategy=:strategy AND direction=:direction "
+                "SELECT 1 FROM ai_signals WHERE strategy=:strategy AND direction=:direction AND timeframe=:timeframe "
                 "AND status='OPEN' AND created_at > :since LIMIT 1"
             ),
-            {"strategy": row["strategy"], "direction": row["direction"], "since": row["created_at"] - 4 * 3600},
+            {"strategy": row["strategy"], "direction": row["direction"], "timeframe": row.get("timeframe", ""),
+             "since": row["created_at"] - EXPIRE_SECONDS},
         ).first()
         if duplicate:
             return False
@@ -283,16 +291,18 @@ async def resolve_open(m, symbol):
                 "UPDATE ai_signals SET status=:status, closed_at=:closed WHERE id=:id",
                 {"status": outcome, "closed": now, "id": signal["id"]},
             )
+            asyncio.create_task(notify.notify_result(signal, outcome))
 
 
 def signal_exists(row):
     with engine.connect() as connection:
         return connection.execute(
             text(
-                "SELECT 1 FROM ai_signals WHERE strategy=:strategy AND direction=:direction "
+                "SELECT 1 FROM ai_signals WHERE strategy=:strategy AND direction=:direction AND timeframe=:timeframe "
                 "AND status='OPEN' AND created_at > :since LIMIT 1"
             ),
-            {"strategy": row["strategy"], "direction": row["direction"], "since": row["created_at"] - 4 * 3600},
+            {"strategy": row["strategy"], "direction": row["direction"], "timeframe": row.get("timeframe", ""),
+             "since": row["created_at"] - EXPIRE_SECONDS},
         ).first() is not None
 
 
@@ -311,9 +321,12 @@ def signals_today(now):
 async def publish(row, context):
     if await asyncio.to_thread(signal_exists, row):
         return False
-    today_count, last_at = await asyncio.to_thread(signals_today, int(time.time()))
-    if today_count >= MAX_DAILY_SIGNALS or (last_at and time.time() - last_at < MIN_GAP_SECONDS):
-        return False
+    if MAX_DAILY_SIGNALS or MIN_GAP_SECONDS:
+        today_count, last_at = await asyncio.to_thread(signals_today, int(time.time()))
+        if (MAX_DAILY_SIGNALS and today_count >= MAX_DAILY_SIGNALS) or (
+            MIN_GAP_SECONDS and last_at and time.time() - last_at < MIN_GAP_SECONDS
+        ):
+            return False
     if context and context.get("blackout"):
         event = context["blackout"]
         await analyst.log_review(row, "BLOCKED", 0, "বড় ইভেন্টের কাছাকাছি সময়: " + event["name"])
@@ -328,22 +341,27 @@ async def publish(row, context):
         }
     else:
         row = {**row, "reason": (row.get("reason", "") + " | (AI যাচাই হয়নি)")[:400]}
-    return await asyncio.to_thread(insert_signal, row)
+    added = await asyncio.to_thread(insert_signal, row)
+    if added:
+        asyncio.create_task(notify.notify_new(row))
+    return added
 
 
-async def load_approved():
+async def load_approved(tf=None):
+    tf = tf or STRAT_TF
     if not QUALITY_GATE:
         return None
-    cache = STATE.get("approved_cache")
-    if cache and time.time() - cache[0] < 300:
-        return cache[1]
+    caches = STATE.setdefault("approved_cache", {})
+    cached = caches.get(tf)
+    if cached and time.time() - cached[0] < 300:
+        return cached[1]
     value = {}
     try:
         await asyncio.to_thread(db_exec, backtest.DDL)
         rows = await asyncio.to_thread(
             db_rows,
             "SELECT result FROM ai_backtest WHERE result LIKE :pattern ORDER BY id DESC LIMIT 1",
-            {"pattern": '%"timeframe": "' + STRAT_TF + '"%'},
+            {"pattern": '%"timeframe": "' + tf + '"%'},
         )
         if rows:
             result = json.loads(rows[0]["result"])
@@ -352,7 +370,7 @@ async def load_approved():
                 value = backtest.compute_approved(strategies)
     except Exception:
         logger.exception("Could not load approved strategies")
-    STATE["approved_cache"] = (time.time(), value)
+    caches[tf] = (time.time(), value)
     return value
 
 
@@ -367,7 +385,7 @@ def gate_item(item, approved, flag_set, level_ctx=None):
     if rule["rr"] == "ADAPT":
         if not level_ctx:
             return None
-        hold_bars = max(1, int(EXPIRE_SECONDS / 60 / int(STRAT_TF)))
+        hold_bars = max(1, int(EXPIRE_SECONDS / 60 / int(level_ctx.get("tf", STRAT_TF))))
         lv = levels.adaptive(
             level_ctx["base"], item["direction"], item["entry"], item["stop_loss"],
             level_ctx["atr"], level_ctx["now"], hold_bars,
@@ -382,7 +400,7 @@ def gate_item(item, approved, flag_set, level_ctx=None):
     return {**item, "take_profit": item["entry"] + direction * rule["rr"] * risk}
 
 
-async def run_cycle(auto=False):
+async def run_cycle(auto=False, light=False):
     if RUN_LOCK.locked():
         return {"status": "busy"}
     async with RUN_LOCK:
@@ -394,9 +412,9 @@ async def run_cycle(auto=False):
         from app import main as m
 
         symbol = m.GOLD_SYMBOL
-        fetch_tfs = list(dict.fromkeys([*TIMEFRAMES, STRAT_TF]))
+        fetch_tfs = list(dict.fromkeys([*TIMEFRAMES, *LIVE_TFS]))
         results = await asyncio.gather(
-            *(m.fetch_analysis_history(symbol, tf, bars=STRAT_WINDOW if tf == STRAT_TF else 160) for tf in fetch_tfs),
+            *(m.fetch_analysis_history(symbol, tf, bars=STRAT_WINDOW[tf] if tf in LIVE_TFS else 160) for tf in fetch_tfs),
             return_exceptions=True,
         )
         candles = {tf: r for tf, r in zip(fetch_tfs, results) if not isinstance(r, Exception)}
@@ -430,117 +448,137 @@ async def run_cycle(auto=False):
                     "gemini": bool(gemini), "gemini_error": gemini_error}
         STATE["market_closed"] = False
         atr = m.calculate_atr(h1)
-        price = h1[-1]["close"]
         created = []
 
-        base = candles.get(STRAT_TF) or h1
-        htf = candles.get("60") if STRAT_TF in ("5", "15") else candles.get("240")
-        base_atr = m.calculate_atr(base)
-        base_price = base[-1]["close"]
-        tf_name = TF_LABEL.get(STRAT_TF, STRAT_TF)
+        primary = LIVE_TFS[0]
+        primary_base = candles.get(primary) or h1
+        base_atr = m.calculate_atr(primary_base)
+        base_price = primary_base[-1]["close"]
+        tf_name = TF_LABEL.get(primary, primary)
 
-        rule = rules_signal(m, base)
-        summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
+        rule = rules_signal(m, primary_base)
         STATE["reviews_used"] = 0
-        context = await analyst.build_context(m, h1, atr, now, force=not auto, technical=summary_data)
-        summary_data["session"] = context["session"]
-        if context["brief"]:
-            summary_data["market_brief"] = analyst.brief_for_prompt(context["brief"], now)
-        gemini, gemini_error = await gemini_analyze(summary_data)
-
-        if gemini:
-            research = {
-                "model": gemini["model"],
-                "bias": gemini["direction"],
-                "confidence": gemini["confidence"],
-                "summary": gemini["summary"],
-                "risk_note": gemini["risk_note"],
-            }
+        gemini, gemini_error = None, None
+        if light:
+            context = await analyst.build_context(m, h1, atr, now, force=False, technical=None)
         else:
-            research = {
-                "model": "rules-only",
-                "bias": rule["direction"] if rule else "NEUTRAL",
-                "confidence": rule["confidence"] if rule else 0,
-                "summary": "; ".join(rule["reasons"]) if rule else "পর্যাপ্ত ডেটা নেই",
-                "risk_note": gemini_error or "",
-            }
-        await asyncio.to_thread(
-            db_exec,
-            "INSERT INTO ai_research (created_at, symbol, model, bias, confidence, summary, risk_note) "
-            "VALUES (:created_at, :symbol, :model, :bias, :confidence, :summary, :risk_note)",
-            {"created_at": now, "symbol": symbol, **research},
-        )
+            summary_data = {TF_LABEL[tf]: m.describe_candles(c) for tf, c in candles.items()}
+            context = await analyst.build_context(m, h1, atr, now, force=not auto, technical=summary_data)
+            summary_data["session"] = context["session"]
+            if context["brief"]:
+                summary_data["market_brief"] = analyst.brief_for_prompt(context["brief"], now)
+            gemini, gemini_error = await gemini_analyze(summary_data)
 
-        approved = await load_approved()
-        try:
-            flag_set = filters.flags(m, base, htf, base_atr, base[-1]["time"]) if base_atr else None
-        except Exception:
-            logger.exception("Filter flags failed")
-            flag_set = None
-        level_ctx = {"base": base, "atr": base_atr, "now": base[-1]["time"]}
+            if gemini:
+                research = {
+                    "model": gemini["model"],
+                    "bias": gemini["direction"],
+                    "confidence": gemini["confidence"],
+                    "summary": gemini["summary"],
+                    "risk_note": gemini["risk_note"],
+                }
+            else:
+                research = {
+                    "model": "rules-only",
+                    "bias": rule["direction"] if rule else "NEUTRAL",
+                    "confidence": rule["confidence"] if rule else 0,
+                    "summary": "; ".join(rule["reasons"]) if rule else "পর্যাপ্ত ডেটা নেই",
+                    "risk_note": gemini_error or "",
+                }
+            await asyncio.to_thread(
+                db_exec,
+                "INSERT INTO ai_research (created_at, symbol, model, bias, confidence, summary, risk_note) "
+                "VALUES (:created_at, :symbol, :model, :bias, :confidence, :summary, :risk_note)",
+                {"created_at": now, "symbol": symbol, **research},
+            )
+
         pool = []
 
-        def collect(raw_item):
+        def collect(raw_item, approved, flag_set, level_ctx, label):
             item = gate_item(raw_item, approved, flag_set, level_ctx)
             if item:
                 score = ((approved or {}).get(item["strategy"]) or {}).get("expectancy_r") or 0
                 pool.append((score, {
-                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": tf_name,
+                    "created_at": now, "strategy": item["strategy"], "symbol": symbol, "timeframe": label,
                     "direction": item["direction"], "entry": item["entry"], "stop_loss": item["stop_loss"],
                     "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
                 }))
 
-        if rule and rule["direction"] in ("BUY", "SELL") and base_atr:
-            sl, tp = build_levels(rule["direction"], base_price, base_atr)
-            collect({
-                "strategy": "RULES_V1", "direction": rule["direction"], "entry": base_price,
-                "stop_loss": sl, "take_profit": tp, "confidence": rule["confidence"],
-                "reason": "; ".join(rule["reasons"]),
-            })
-
         if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and base_atr:
             sl, tp = build_levels(gemini["direction"], base_price, base_atr)
-            added = await asyncio.to_thread(insert_signal, {
+            gemini_row = {
                 "created_at": now, "strategy": "GEMINI_V1", "symbol": symbol, "timeframe": tf_name,
                 "direction": gemini["direction"], "entry": base_price, "stop_loss": sl, "take_profit": tp,
                 "confidence": gemini["confidence"], "reason": gemini["summary"][:400],
-            })
-            if added:
+            }
+            if await asyncio.to_thread(insert_signal, gemini_row):
                 created.append("GEMINI_V1")
+                asyncio.create_task(notify.notify_new(gemini_row))
 
-        try:
-            for raw_item in smc.analyze(base, base_atr, htf)["signals"]:
-                collect(raw_item)
-        except Exception:
-            logger.exception("SMC analysis failed")
+        for tf in LIVE_TFS:
+            base = candles.get(tf)
+            if not base:
+                continue
+            tf_atr = m.calculate_atr(base)
+            if not tf_atr:
+                continue
+            htf = candles.get("60") if tf in ("5", "15") else candles.get("240")
+            label = TF_LABEL.get(tf, tf)
+            approved = await load_approved(tf)
+            try:
+                flag_set = filters.flags(m, base, htf, tf_atr, base[-1]["time"])
+            except Exception:
+                logger.exception("Filter flags failed")
+                flag_set = None
+            level_ctx = {"base": base, "atr": tf_atr, "now": base[-1]["time"], "tf": tf}
 
-        try:
-            for raw_item in [
-                *classic.analyze(m, base, base_atr), *classic2.analyze(m, base, base_atr),
-                *patterns.analyze(m, base, base_atr),
-            ]:
-                collect(raw_item)
-        except Exception:
-            logger.exception("Classic strategies failed")
+            tf_rule = rule if tf == primary else rules_signal(m, base)
+            if tf_rule and tf_rule["direction"] in ("BUY", "SELL"):
+                sl, tp = build_levels(tf_rule["direction"], base[-1]["close"], tf_atr)
+                collect({
+                    "strategy": "RULES_V1", "direction": tf_rule["direction"], "entry": base[-1]["close"],
+                    "stop_loss": sl, "take_profit": tp, "confidence": tf_rule["confidence"],
+                    "reason": "; ".join(tf_rule["reasons"]),
+                }, approved, flag_set, level_ctx, label)
+
+            try:
+                for raw_item in smc.analyze(base, tf_atr, htf)["signals"]:
+                    collect(raw_item, approved, flag_set, level_ctx, label)
+            except Exception:
+                logger.exception("SMC analysis failed")
+
+            try:
+                for raw_item in [
+                    *classic.analyze(m, base, tf_atr), *classic2.analyze(m, base, tf_atr),
+                    *patterns.analyze(m, base, tf_atr),
+                ]:
+                    collect(raw_item, approved, flag_set, level_ctx, label)
+            except Exception:
+                logger.exception("Classic strategies failed")
 
         pool.sort(key=lambda entry: entry[0], reverse=True)
         for _, row in pool:
             if await publish(row, context):
-                created.append(row["strategy"])
+                created.append(f"{row['strategy']}@{row['timeframe']}")
 
         STATE["last_run"] = now
-        STATE["last_error"] = gemini_error
-        return {"status": "ok", "created": created, "gemini": bool(gemini), "gemini_error": gemini_error}
+        if not light:
+            STATE["last_error"] = gemini_error
+        return {"status": "ok", "created": created, "gemini": bool(gemini), "gemini_error": gemini_error, "light": light}
 
 
 async def auto_loop():
     await asyncio.sleep(20)
+    last_heavy = 0.0
     while True:
+        heavy = time.time() - last_heavy >= AI_INTERVAL_MIN * 60 - 30
         try:
-            await run_cycle(auto=True)
+            result = await run_cycle(auto=True, light=not heavy)
+            if heavy and result.get("status") != "busy":
+                last_heavy = time.time()
         except Exception:
             logger.exception("AI auto cycle failed")
-        await asyncio.sleep(AI_INTERVAL_MIN * 60)
+        await asyncio.sleep(SCAN_SECONDS)
 
 
 async def start_background():
