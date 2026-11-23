@@ -17,6 +17,7 @@ from app import classic2
 from app import patterns
 from app import levels
 from app import notify
+from app import gkeys
 from app import filters
 from app import analyst
 from app import backtest
@@ -25,6 +26,7 @@ logger = logging.getLogger("gold-ai-lab.signals")
 router = APIRouter()
 router.include_router(backtest.router)
 router.include_router(notify.router)
+router.include_router(gkeys.router)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "").strip()
 GEMINI_FALLBACKS = [
@@ -197,7 +199,7 @@ def gemini_candidates():
 
 
 async def gemini_analyze(summary):
-    key = os.getenv("GEMINI_API_KEY")
+    key = await gkeys.key_for("research")
     if not key:
         return None, "GEMINI_API_KEY সেট করা নেই"
 
@@ -221,6 +223,7 @@ async def gemini_analyze(summary):
         async with httpx.AsyncClient(timeout=45) as client:
             for model in gemini_candidates():
                 response = await client.post(GEMINI_URL.format(model=model), headers=headers, json=body)
+                gkeys.record("research", response.status_code)
                 if response.status_code == 404:
                     last_error = f"{model}: মডেল পাওয়া যায়নি (404)"
                     continue
@@ -637,7 +640,7 @@ def signals_page():
 @router.get("/api/ai/status")
 def ai_status():
     return {
-        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
+        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")) or gkeys.any_configured(),
         "model": STATE.get("gemini_model") or GEMINI_MODEL or "auto",
         "auto": AI_AUTO,
         "interval_minutes": AI_INTERVAL_MIN,
