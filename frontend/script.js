@@ -1766,3 +1766,74 @@ if (document.readyState === "loading") {
 } else {
     setupBtOverlay();
 }
+
+
+// ==================================================
+// FULLSCREEN CHART
+// ==================================================
+
+let chartFullscreen = false;
+
+function resizeChartToContainer() {
+    const container = document.getElementById("market-chart");
+    if (!container || typeof marketChart === "undefined" || !marketChart) return;
+    requestAnimationFrame(() => {
+        marketChart.resize(container.clientWidth, container.clientHeight);
+        try { marketChart.timeScale().scrollToRealTime(); } catch (error) { /* older chart versions */ }
+    });
+}
+
+function setChartFullscreen(on) {
+    const container = document.getElementById("market-chart");
+    if (!container || !container.parentElement) return;
+    const panel = container.parentElement;
+    chartFullscreen = on;
+    panel.classList.toggle("chart-fs", on);
+    document.body.style.overflow = on ? "hidden" : "";
+    const button = document.getElementById("chart-fs-toggle");
+    if (button) button.textContent = on ? "✕ ফুল স্ক্রিন বন্ধ" : "⛶ ফুল স্ক্রিন";
+
+    if (on && panel.requestFullscreen && !document.fullscreenElement) {
+        panel.requestFullscreen().catch(() => { /* the fixed layout still fills the screen */ });
+    } else if (!on && document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+    }
+    setTimeout(resizeChartToContainer, 60);
+    setTimeout(resizeChartToContainer, 300);
+}
+
+function setupChartFullscreen() {
+    const container = document.getElementById("market-chart");
+    if (!container || !container.parentElement || document.getElementById("chart-fs-toggle")) return;
+
+    const style = document.createElement("style");
+    style.textContent = `
+        .chart-fs { position: fixed !important; inset: 0; z-index: 9999; margin: 0 !important; padding: 10px !important;
+            background: #080d18; overflow: auto; display: flex !important; flex-direction: column; border-radius: 0 !important; }
+        .chart-fs #market-chart { flex: 1 1 auto; height: auto !important; min-height: 55vh; }
+    `;
+    document.head.appendChild(style);
+
+    const button = document.createElement("button");
+    button.id = "chart-fs-toggle";
+    button.type = "button";
+    button.className = "research-refresh-btn";
+    button.style.cssText = "margin:0 8px 8px 0";
+    button.textContent = "⛶ ফুল স্ক্রিন";
+    button.addEventListener("click", () => setChartFullscreen(!chartFullscreen));
+    container.parentElement.insertBefore(button, container.parentElement.firstChild);
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && chartFullscreen) setChartFullscreen(false);
+    });
+    document.addEventListener("fullscreenchange", () => {
+        if (!document.fullscreenElement && chartFullscreen) setChartFullscreen(false);
+    });
+    window.addEventListener("resize", () => { if (chartFullscreen) resizeChartToContainer(); });
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", setupChartFullscreen);
+} else {
+    setupChartFullscreen();
+}
