@@ -367,56 +367,75 @@ async def market_history(
     headers = get_pyth_headers()
     end_time = to if to is not None else int(time.time())
     seconds_per_bar = int(resolution) * 60
-    start_time = end_time - seconds_per_bar * bars
-
-    params = {
-        "symbol": symbol,
-        "from": start_time,
-        "to": end_time,
-        "resolution": resolution
-    }
     endpoint = f"/{PYTH_CHANNEL}/history"
 
-    response = await pyth_get(endpoint, params=params, headers=headers, timeout=30)
-    if response.status_code != 200:
-        handle_pyth_error(response, endpoint)
-
-    try:
-        data = response.json()
-    except ValueError:
-        raise HTTPException(status_code=502, detail="Invalid historical data JSON from Pyth")
-
-    if not isinstance(data, dict) or data.get("s") != "ok":
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "message": "Pyth returned no valid OHLC history",
-                "provider_message": data.get("errmsg") if isinstance(data, dict) else None,
-                "symbol": symbol,
-                "requested_from": start_time,
-                "requested_to": end_time
-            }
-        )
-
-    timestamps = data.get("t") or []
-    opens = data.get("o") or []
-    highs = data.get("h") or []
-    lows = data.get("l") or []
-    closes = data.get("c") or []
-
-    lengths = [len(timestamps), len(opens), len(highs), len(lows), len(closes)]
-    if len(set(lengths)) != 1:
-        raise HTTPException(status_code=502, detail="Pyth returned inconsistent candle data")
+    # Gold is closed on weekends and holidays. For short timeframes (M1/M5) a
+    # window of `bars` candles can fall entirely inside a closed-market gap and
+    # come back empty, which used to stop the chart from loading older candles.
+    # Step back window by window until a window that contains candles is found.
+    MAX_GAP_ATTEMPTS = 12
 
     candles = []
-    for index in range(len(timestamps)):
-        candles.append({
-            "time": int(timestamps[index]),
-            "open": float(opens[index]),
-            "high": float(highs[index]),
-            "low": float(lows[index]),
-            "close": float(closes[index])
-        })
+    start_time = end_time - seconds_per_bar * bars
+    window_end = end_time
+
+    for _attempt in range(MAX_GAP_ATTEMPTS):
+        window_end = end_time
+        start_time = window_end - seconds_per_bar * bars
+
+        params = {
+            "symbol": symbol,
+            "from": start_time,
+            "to": window_end,
+            "resolution": resolution
+        }
+
+        response = await pyth_get(endpoint, params=params, headers=headers, timeout=30)
+        if response.status_code != 200:
+            handle_pyth_error(response, endpoint)
+
+        try:
+            data = response.json()
+        except ValueError:
+            raise HTTPException(status_code=502, detail="Invalid historical data JSON from Pyth")
+
+        if not isinstance(data, dict) or data.get("s") not in ("ok", "no_data"):
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": "Pyth returned no valid OHLC history",
+                    "provider_message": data.get("errmsg") if isinstance(data, dict) else None,
+                    "symbol": symbol,
+                    "requested_from": start_time,
+                    "requested_to": window_end
+                }
+            )
+
+        timestamps = data.get("t") or []
+        opens = data.get("o") or []
+        highs = data.get("h") or []
+        lows = data.get("l") or []
+        closes = data.get("c") or []
+
+        lengths = [len(timestamps), len(opens), len(highs), len(lows), len(closes)]
+        if len(set(lengths)) != 1:
+            raise HTTPException(status_code=502, detail="Pyth returned inconsistent candle data")
+
+        if not timestamps:
+            # Empty window (market closed) - continue with the window before it.
+            end_time = start_time - 1
+            continue
+
+        candles = []
+        for index in range(len(timestamps)):
+            candles.append({
+                "time": int(timestamps[index]),
+                "open": float(opens[index]),
+                "high": float(highs[index]),
+                "low": float(lows[index]),
+                "close": float(closes[index])
+            })
+        break
 
     candles.sort(key=lambda item: item["time"])
 
@@ -428,7 +447,7 @@ async def market_history(
         "resolution": resolution,
         "count": len(candles),
         "requested_from": start_time,
-        "requested_to": end_time,
+        "requested_to": window_end,
         "bars": candles,
         "oldest_time": candles[0]["time"] if candles else None,
         "newest_time": candles[-1]["time"] if candles else None,
