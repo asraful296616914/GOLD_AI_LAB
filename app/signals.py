@@ -640,7 +640,10 @@ def ai_status():
         "last_error": STATE["last_error"],
         "market_closed": STATE["market_closed"],
         "quality_gate": QUALITY_GATE,
-        "approved": (STATE.get("approved_cache") or (0, None))[1],
+        "approved": {
+            TF_LABEL.get(tf, tf): sorted(entry[1] or {})
+            for tf, entry in (STATE.get("approved_cache") or {}).items()
+        },
         "last_diag": STATE.get("last_diag"),
     }
 
