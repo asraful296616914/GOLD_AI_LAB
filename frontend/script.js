@@ -1837,3 +1837,96 @@ if (document.readyState === "loading") {
 } else {
     setupChartFullscreen();
 }
+
+
+// ==================================================
+// CHART ZOOM CONTROLS (+ / − / reset, TradingView style)
+// ==================================================
+
+(function () {
+    const ZOOM_STEP = 0.2;   // each click zooms by 20%
+    const MIN_VISIBLE_BARS = 5;
+
+    function zoomChart(direction) {
+        if (typeof marketChart === "undefined" || !marketChart) return;
+        try {
+            const timeScale = marketChart.timeScale();
+            const range = timeScale.getVisibleLogicalRange();
+            if (!range) return;
+
+            const width = range.to - range.from;
+            const factor = direction > 0 ? (1 - ZOOM_STEP) : (1 / (1 - ZOOM_STEP));
+            const newWidth = Math.max(MIN_VISIBLE_BARS, width * factor);
+            const center = (range.from + range.to) / 2;
+
+            timeScale.setVisibleLogicalRange({
+                from: center - newWidth / 2,
+                to: center + newWidth / 2
+            });
+        } catch (error) {
+            console.warn("Chart zoom failed:", error);
+        }
+    }
+
+    function resetChartZoom() {
+        if (typeof marketChart === "undefined" || !marketChart) return;
+        try {
+            marketChart.timeScale().resetTimeScale();
+        } catch (error) {
+            try { marketChart.timeScale().fitContent(); } catch (e) { /* ignore */ }
+        }
+    }
+
+    function setupChartZoomControls() {
+        const container = document.getElementById("market-chart");
+        if (!container || document.getElementById("chart-zoom-controls")) return;
+
+        if (getComputedStyle(container).position === "static") {
+            container.style.position = "relative";
+        }
+
+        const style = document.createElement("style");
+        style.textContent = `
+            #chart-zoom-controls {
+                position: absolute; left: 50%; bottom: 36px; transform: translateX(-50%);
+                z-index: 10; display: flex; gap: 6px; padding: 4px;
+                background: rgba(11, 20, 34, 0.75); border: 1px solid #26364d;
+                border-radius: 8px; backdrop-filter: blur(4px);
+            }
+            #chart-zoom-controls button {
+                width: 34px; height: 30px; padding: 0; cursor: pointer;
+                font-size: 18px; line-height: 1; color: #d6e0ef;
+                background: #121f33; border: 1px solid #26364d; border-radius: 6px;
+                touch-action: manipulation; user-select: none;
+            }
+            #chart-zoom-controls button:hover { background: #1b2d49; color: #fff; }
+            #chart-zoom-controls button:active { background: #243a5c; }
+        `;
+        document.head.appendChild(style);
+
+        const bar = document.createElement("div");
+        bar.id = "chart-zoom-controls";
+
+        const makeButton = (label, title, handler) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = label;
+            button.title = title;
+            button.setAttribute("aria-label", title);
+            button.addEventListener("click", handler);
+            return button;
+        };
+
+        bar.appendChild(makeButton("−", "Zoom out", () => zoomChart(-1)));
+        bar.appendChild(makeButton("+", "Zoom in", () => zoomChart(1)));
+        bar.appendChild(makeButton("⟲", "Reset zoom", resetChartZoom));
+
+        container.appendChild(bar);
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", setupChartZoomControls);
+    } else {
+        setupChartZoomControls();
+    }
+})();
