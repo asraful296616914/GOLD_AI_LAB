@@ -100,10 +100,11 @@ def parse_json(text):
         return None
 
 
-async def gemini_post(body):
+async def gemini_post(body, role="brief"):
     from app import signals as sg
+    from app import gkeys
 
-    key = os.getenv("GEMINI_API_KEY")
+    key = await gkeys.key_for(role)
     if not key:
         return None, "GEMINI_API_KEY সেট করা নেই"
     headers = {"x-goog-api-key": key.strip(), "Content-Type": "application/json"}
@@ -112,6 +113,7 @@ async def gemini_post(body):
         async with httpx.AsyncClient(timeout=70) as client:
             for model in sg.gemini_candidates():
                 response = await client.post(sg.GEMINI_URL.format(model=model), headers=headers, json=body)
+                gkeys.record(role, response.status_code)
                 if response.status_code in (404, 429):
                     last_error = f"{model}: {'মডেল নেই (404)' if response.status_code == 404 else 'লিমিট শেষ (429)'}"
                     continue
@@ -318,7 +320,7 @@ async def review(row, context):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
     }
-    result, error = await gemini_post(body)
+    result, error = await gemini_post(body, role="review")
     if not result:
         return None
     parsed = parse_json(result["text"])
