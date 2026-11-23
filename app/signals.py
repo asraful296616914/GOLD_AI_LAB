@@ -33,7 +33,7 @@ GEMINI_FALLBACKS = [
 ]
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 AI_AUTO = os.getenv("AI_AUTO", "1") == "1"
-AI_INTERVAL_MIN = max(15, int(os.getenv("AI_INTERVAL_MINUTES", "15")))
+AI_INTERVAL_MIN = max(5, int(os.getenv("AI_INTERVAL_MINUTES", "5")))
 MANUAL_GAP_SECONDS = 120
 EXPIRE_SECONDS = 3 * 3600
 MAX_DAILY_SIGNALS = int(os.getenv("MAX_DAILY_SIGNALS", "0"))
@@ -485,7 +485,12 @@ async def run_cycle(auto=False, light=False):
             summary_data["session"] = context["session"]
             if context["brief"]:
                 summary_data["market_brief"] = analyst.brief_for_prompt(context["brief"], now)
-            gemini, gemini_error = await gemini_analyze(summary_data)
+            if time.time() < STATE.get("gemini_backoff_until", 0):
+                gemini, gemini_error = None, "Gemini ফ্রি লিমিট শেষ, কিছুক্ষণ বিরতি (স্ট্র্যাটেজি স্ক্যান চলছে)"
+            else:
+                gemini, gemini_error = await gemini_analyze(summary_data)
+                if gemini_error and "429" in gemini_error:
+                    STATE["gemini_backoff_until"] = time.time() + 15 * 60
 
             if gemini:
                 research = {
