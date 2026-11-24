@@ -55,6 +55,13 @@ STRAT_WINDOW = {"5": 400, "15": 200, "60": 160}
 SCAN_SECONDS = max(60, int(os.getenv("SCAN_MINUTES", "5")) * 60)
 PAPER_START_BALANCE = float(os.getenv("PAPER_START_BALANCE", "10000"))
 PAPER_RISK_PCT = float(os.getenv("PAPER_RISK_PCT", "1"))
+# Strategy Lab: every signal is paper-traded in the lab. A strategy is promoted to the MAIN list
+# (and may be sent to Telegram after the AI says yes) only while it meets all of these:
+LAB_LIVE_MIN = float(os.getenv("LAB_LIVE_MIN", "35"))          # live lab accuracy must be ABOVE this (%)
+LAB_BACKTEST_MIN = float(os.getenv("LAB_BACKTEST_MIN", "40"))  # backtest accuracy must be ABOVE this (%)
+LAB_MIN_TRADES = int(os.getenv("LAB_MIN_TRADES", "10"))        # minimum finished live lab trades
+LAB_WINDOW = int(os.getenv("LAB_WINDOW", "20"))                # only the most recent N finished trades count
+TRACKS = ("MAIN", "LAB", "ALL")
 
 STATE = {"last_run": None, "last_error": None, "market_closed": False}
 RUN_LOCK = asyncio.Lock()
@@ -90,6 +97,12 @@ DDL = [
     "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS quality TEXT",
     "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS accuracy_note TEXT",
     "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS ai_verdict TEXT",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS track TEXT NOT NULL DEFAULT 'LAB'",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS lab_note TEXT",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS live_accuracy DOUBLE PRECISION",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS live_sample INTEGER",
+    "ALTER TABLE ai_signals ADD COLUMN IF NOT EXISTS live_avg_r DOUBLE PRECISION",
+    "CREATE INDEX IF NOT EXISTS ai_signals_track_idx ON ai_signals (track, id)",
     "CREATE TABLE IF NOT EXISTS ai_briefs (id BIGSERIAL PRIMARY KEY, created_at BIGINT NOT NULL, data TEXT NOT NULL)",
 ]
 
@@ -125,13 +138,17 @@ def insert_signal(row):
         connection.execute(
             text(
                 "INSERT INTO ai_signals (created_at, strategy, symbol, timeframe, direction, entry, "
-                "stop_loss, take_profit, confidence, reason, accuracy, win_sample, quality, accuracy_note, ai_verdict) "
+                "stop_loss, take_profit, confidence, reason, accuracy, win_sample, quality, accuracy_note, ai_verdict, "
+                "track, lab_note, live_accuracy, live_sample, live_avg_r) "
                 "VALUES (:created_at, :strategy, :symbol, :timeframe, :direction, :entry, :stop_loss, :take_profit, "
-                ":confidence, :reason, :accuracy, :win_sample, :quality, :accuracy_note, :ai_verdict)"
+                ":confidence, :reason, :accuracy, :win_sample, :quality, :accuracy_note, :ai_verdict, "
+                ":track, :lab_note, :live_accuracy, :live_sample, :live_avg_r)"
             ),
-            {key: row.get(key) for key in (
+            {**{key: row.get(key) for key in (
                 "created_at", "strategy", "symbol", "timeframe", "direction", "entry", "stop_loss", "take_profit",
-                "confidence", "reason", "accuracy", "win_sample", "quality", "accuracy_note", "ai_verdict")},
+                "confidence", "reason", "accuracy", "win_sample", "quality", "accuracy_note", "ai_verdict",
+                "lab_note", "live_accuracy", "live_sample", "live_avg_r")},
+             "track": row.get("track") or "LAB"},
         )
         return True
 
@@ -285,7 +302,8 @@ async def resolve_open(m, symbol):
                 "UPDATE ai_signals SET status=:status, closed_at=:closed WHERE id=:id",
                 {"status": outcome, "closed": now, "id": signal["id"]},
             )
-            asyncio.create_task(notify.notify_result(signal, outcome))
+            if signal.get("track") == "MAIN":
+                asyncio.create_task(notify.notify_result(signal, outcome))
 
 
 def signal_exists(row):
@@ -312,47 +330,132 @@ def signals_today(now):
         return int(row[0]), int(row[1])
 
 
+def lab_record(rows):
+    """Accuracy and average R of the most recent finished lab trades (rows = WIN/LOSS only)."""
+    n = len(rows)
+    wins = sum(1 for r in rows if r["status"] == "WIN")
+    rs = []
+    for r in rows:
+        if r["status"] == "WIN":
+            risk = abs(r["entry"] - r["stop_loss"])
+            rs.append(abs(r["take_profit"] - r["entry"]) / risk if risk else 0.0)
+        else:
+            rs.append(-1.0)
+    return {
+        "n": n, "wins": wins,
+        "accuracy": round(wins / n * 100, 1) if n else None,
+        "avg_r": round(sum(rs) / n, 2) if n else None,
+    }
+
+
+def lab_rows(strategy, timeframe):
+    return db_rows(
+        "SELECT status, entry, stop_loss, take_profit FROM ai_signals "
+        "WHERE strategy=:s AND timeframe=:tf AND status IN ('WIN','LOSS') "
+        "ORDER BY COALESCE(closed_at, created_at) DESC, id DESC LIMIT :n",
+        {"s": strategy, "tf": timeframe, "n": LAB_WINDOW},
+    )
+
+
+def backtest_accuracy(bt, strategy, rr_hint=2.0):
+    """Win rate of the strategy in the latest backtest (approved variant, otherwise unfiltered). -> (win%, trades)."""
+    variants = (bt.get("strategies") or {}).get(strategy)
+    if not variants:
+        return None, 0
+    rule = (bt.get("approved") or {}).get(strategy)
+    if rule:
+        key = f"{rule['fid']}|{rule['rr']}"
+    else:
+        key = f"NONE|{min(backtest.RR_LIST, key=lambda x: abs(x - rr_hint))}"
+    stats = (variants.get(key) or {}).get("all")
+    if not stats or stats.get("win_rate") is None:
+        return None, 0
+    trades = stats.get("trades") or 0
+    if not rule and trades < 20:
+        return None, trades
+    return stats["win_rate"], trades
+
+
+def lab_problems(bt_accuracy, rec):
+    """Empty list = the strategy qualifies for the MAIN list."""
+    problems = []
+    if bt_accuracy is None:
+        problems.append("ব্যাকটেস্ট ডেটা নেই")
+    elif bt_accuracy <= LAB_BACKTEST_MIN:
+        problems.append(f"ব্যাকটেস্ট {bt_accuracy}% (দরকার >{LAB_BACKTEST_MIN:g}%)")
+    if rec["n"] < LAB_MIN_TRADES:
+        problems.append(f"লাইভ ল্যাব ট্রেড {rec['n']}/{LAB_MIN_TRADES}")
+    else:
+        if rec["accuracy"] <= LAB_LIVE_MIN:
+            problems.append(f"লাইভ জয় {rec['accuracy']}% (দরকার >{LAB_LIVE_MIN:g}%)")
+        if (rec["avg_r"] or 0) <= 0:
+            problems.append(f"গড় R {rec['avg_r']:+.2f} (দরকার >0)")
+    return problems
+
+
 async def publish(row, context, diag=None):
-    def skip(reason):
+    """Every signal is recorded in the lab. Only qualified strategies + AI approval reach MAIN (and Telegram).
+    Returns "MAIN", "LAB" or False (duplicate / limit)."""
+    def count(key):
         if diag is not None:
-            diag[reason] = diag.get(reason, 0) + 1
-        return False
+            diag[key] = diag.get(key, 0) + 1
 
     if await asyncio.to_thread(signal_exists, row):
-        return skip("skipped_duplicate_open_signal")
+        count("skipped_duplicate_open_signal")
+        return False
     if MAX_DAILY_SIGNALS or MIN_GAP_SECONDS:
         today_count, last_at = await asyncio.to_thread(signals_today, int(time.time()))
         if (MAX_DAILY_SIGNALS and today_count >= MAX_DAILY_SIGNALS) or (
             MIN_GAP_SECONDS and last_at and time.time() - last_at < MIN_GAP_SECONDS
         ):
-            return skip("skipped_daily_limit_or_gap")
+            count("skipped_daily_limit_or_gap")
+            return False
+
+    rec = lab_record(await asyncio.to_thread(lab_rows, row["strategy"], row.get("timeframe", "")))
+    problems = lab_problems(row.get("bt_accuracy"), rec)
+    live_note = (
+        f"লাইভ ল্যাব রেকর্ড (শেষ {rec['n']} ট্রেড): জয় {rec['accuracy']}% · গড় R {rec['avg_r']:+.2f}"
+        if rec["n"] else "লাইভ ল্যাব রেকর্ড: এখনো কোনো ট্রেড শেষ হয়নি"
+    )
+    row = {**row, "live_accuracy": rec["accuracy"], "live_sample": rec["n"], "live_avg_r": rec["avg_r"],
+           "live_note": live_note}
     note = row.get("reason", "")
     event = (context or {}).get("blackout")
     if event:
-        await analyst.log_review(row, "BLOCKED", 0, "বড় ইভেন্টের কাছাকাছি সময়: " + event["name"])
-        if STRICT_GATE:
-            return skip("skipped_news_blackout")
         note += " | ⚠ বড় ইভেন্টের কাছাকাছি: " + event["name"]
-    verdict = await analyst.review(row, context) if context else None
-    ai_verdict = None
-    if verdict and verdict["verdict"] in ("APPROVE", "REJECT", "WAIT"):
-        ai_verdict = verdict["verdict"]
-        if STRICT_GATE and ai_verdict != "APPROVE":
-            return skip("ai_review_" + ai_verdict.lower())
-        note += " | AI যাচাই (" + ai_verdict + "): " + verdict["reason"]
-        if ai_verdict == "APPROVE":
-            row = {**row, "confidence": verdict["confidence"]}
+
+    track, ai_verdict, lab_note, ai_reason = "LAB", None, "", ""
+    if problems:
+        lab_note = "ল্যাবে আছে: " + "; ".join(problems)
+        count("lab_not_qualified")
     else:
-        if STRICT_GATE and verdict:
-            return skip("ai_review_" + str(verdict["verdict"]).lower())
-        note += " | (AI যাচাই হয়নি)"
-    row = {**row, "reason": note[:400], "ai_verdict": ai_verdict}
+        verdict = await analyst.review(row, context) if context else None
+        if verdict and verdict["verdict"] in ("APPROVE", "REJECT", "WAIT"):
+            ai_verdict, ai_reason = verdict["verdict"], verdict["reason"]
+            note += " | AI যাচাই (" + ai_verdict + "): " + ai_reason
+            if ai_verdict == "APPROVE":
+                track = "MAIN"
+                lab_note = "যোগ্য কৌশল + AI অনুমোদন → মূল তালিকা"
+                row = {**row, "confidence": verdict["confidence"], "ai_confidence": verdict["confidence"]}
+                count("promoted_to_main")
+            else:
+                lab_note = f"যোগ্য কৌশল, কিন্তু AI মূল তালিকায় পাঠায়নি ({ai_verdict}): {ai_reason}"
+                count("lab_ai_not_approved")
+        else:
+            lab_note = "যোগ্য কৌশল, কিন্তু AI যাচাই হয়নি (সীমা/ত্রুটি), তাই এবার শুধু ল্যাবে"
+            note += " | (AI যাচাই হয়নি)"
+            count("lab_ai_unavailable")
+
+    row = {**row, "reason": note[:400], "ai_verdict": ai_verdict, "track": track, "lab_note": lab_note[:400],
+           "ai_reason": ai_reason, "session_text": ((context or {}).get("session") or {}).get("text"),
+           "risk_event": event["name"] if event else None}
     added = await asyncio.to_thread(insert_signal, row)
-    if added:
+    if not added:
+        count("skipped_duplicate_open_signal")
+        return False
+    if track == "MAIN":
         asyncio.create_task(notify.notify_new(row))
-    else:
-        return skip("skipped_duplicate_open_signal")
-    return added
+    return track
 
 
 async def load_bt(tf=None):
@@ -622,6 +725,11 @@ async def run_cycle(auto=False, light=False):
                 "take_profit": item["take_profit"], "confidence": item["confidence"], "reason": item["reason"],
                 "accuracy": est["accuracy"], "win_sample": est["win_sample"], "quality": est["quality"],
                 "accuracy_note": est["accuracy_note"],
+                "bt_accuracy": backtest_accuracy(
+                    bt, item["strategy"],
+                    abs(item["take_profit"] - item["entry"]) / abs(item["entry"] - item["stop_loss"])
+                    if item["entry"] != item["stop_loss"] else 2.0,
+                )[0],
             }))
 
         if gemini and gemini["direction"] in ("BUY", "SELL") and gemini["confidence"] >= 60 and base_atr:
@@ -632,9 +740,9 @@ async def run_cycle(auto=False, light=False):
                 "confidence": gemini["confidence"], "reason": gemini["summary"][:400],
             }
             gemini_row.update(await live_estimate("GEMINI_V1"))
-            if await asyncio.to_thread(insert_signal, gemini_row):
-                created.append("GEMINI_V1")
-                asyncio.create_task(notify.notify_new(gemini_row))
+            gemini_row["track"] = "LAB"
+            gemini_row["lab_note"] = "Gemini-র নিজস্ব সিগন্যাল ব্যাকটেস্ট করা যায় না, তাই শুধু ল্যাবে"
+            await asyncio.to_thread(insert_signal, gemini_row)
 
         for tf in LIVE_TFS:
             base = candles.get(tf)
@@ -680,8 +788,11 @@ async def run_cycle(auto=False, light=False):
 
         pool.sort(key=lambda entry: entry[0], reverse=True)
         for _, row in pool:
-            if await publish(row, context, diag):
+            outcome = await publish(row, context, diag)
+            if outcome == "MAIN":
                 created.append(f"{row['strategy']}@{row['timeframe']}")
+            elif outcome == "LAB":
+                diag["lab_recorded"] = diag.get("lab_recorded", 0) + 1
 
         diag["created"] = created
         STATE["last_diag"] = diag
@@ -723,6 +834,79 @@ def signals_page():
     return FileResponse(m.FRONTEND_DIR / "signals.html")
 
 
+@router.get("/lab", include_in_schema=False)
+def lab_page():
+    from app import main as m
+    return FileResponse(m.FRONTEND_DIR / "lab.html")
+
+
+@router.get("/api/ai/lab/strategies")
+async def ai_lab_strategies():
+    rows = await asyncio.to_thread(
+        db_rows,
+        "SELECT strategy, timeframe, status, track, ai_verdict, entry, stop_loss, take_profit "
+        "FROM ai_signals ORDER BY id DESC LIMIT 8000",
+    )
+    groups = {}
+
+    def group(strategy, timeframe):
+        return groups.setdefault((strategy, timeframe), {
+            "strategy": strategy, "timeframe": timeframe, "total": 0, "open": 0, "wins": 0, "losses": 0,
+            "expired": 0, "main_count": 0, "recent": [],
+        })
+
+    effect = {"approved": {"wins": 0, "losses": 0}, "not_approved": {"wins": 0, "losses": 0}}
+    for r in rows:  # newest first
+        g = group(r["strategy"], r["timeframe"])
+        g["total"] += 1
+        g["main_count"] += 1 if r["track"] == "MAIN" else 0
+        status = r["status"]
+        if status == "OPEN":
+            g["open"] += 1
+        elif status == "EXPIRED":
+            g["expired"] += 1
+        elif status in ("WIN", "LOSS"):
+            g["wins" if status == "WIN" else "losses"] += 1
+            if len(g["recent"]) < LAB_WINDOW:
+                g["recent"].append(r)
+            if r["ai_verdict"] in ("APPROVE", "REJECT", "WAIT"):
+                effect["approved" if r["ai_verdict"] == "APPROVE" else "not_approved"][
+                    "wins" if status == "WIN" else "losses"] += 1
+
+    bts = {}
+    for tf in LIVE_TFS:
+        bt = await load_bt(tf)
+        bts[TF_LABEL.get(tf, tf)] = bt
+        for name in (bt.get("strategies") or {}):
+            group(name, TF_LABEL.get(tf, tf))
+
+    out = []
+    for g in groups.values():
+        rec = lab_record(g.pop("recent"))
+        bt = bts.get(g["timeframe"])
+        bt_acc, bt_n = backtest_accuracy(bt, g["strategy"]) if bt else (None, 0)
+        problems = lab_problems(bt_acc, rec)
+        decided = g["wins"] + g["losses"]
+        g.update({
+            "lifetime_accuracy": round(g["wins"] / decided * 100, 1) if decided else None,
+            "window_trades": rec["n"], "window_accuracy": rec["accuracy"], "window_avg_r": rec["avg_r"],
+            "bt_accuracy": bt_acc, "bt_sample": bt_n,
+            "state": "PROMOTED" if not problems else ("DEMOTED" if g["main_count"] else "LAB"),
+            "problems": problems,
+        })
+        out.append(g)
+    order = {"PROMOTED": 0, "DEMOTED": 1, "LAB": 2}
+    out.sort(key=lambda g: (order[g["state"]], -(g["window_accuracy"] or 0), g["strategy"]))
+    for side in effect.values():
+        decided = side["wins"] + side["losses"]
+        side["accuracy"] = round(side["wins"] / decided * 100, 1) if decided else None
+    return {
+        "thresholds": {"live_min": LAB_LIVE_MIN, "backtest_min": LAB_BACKTEST_MIN,
+                       "min_trades": LAB_MIN_TRADES, "window": LAB_WINDOW},
+        "strategies": out, "ai_effect": effect,
+    }
+
+
 @router.get("/api/ai/status")
 def ai_status():
     return {
@@ -734,6 +918,8 @@ def ai_status():
         "last_error": STATE["last_error"],
         "market_closed": STATE["market_closed"],
         "strict_gate": STRICT_GATE,
+        "lab": {"live_min": LAB_LIVE_MIN, "backtest_min": LAB_BACKTEST_MIN,
+                "min_trades": LAB_MIN_TRADES, "window": LAB_WINDOW},
         "backtest_auto_hours": backtest.AUTO_HOURS if backtest.AUTO else None,
         "approved": {
             TF_LABEL.get(tf, tf): sorted(entry[1]["approved"])
@@ -748,10 +934,20 @@ async def ai_run():
     return await run_cycle()
 
 
+def track_where(track):
+    track = (track or "MAIN").upper()
+    if track not in TRACKS:
+        raise HTTPException(status_code=400, detail="track হবে MAIN, LAB বা ALL")
+    return "" if track == "ALL" else f" WHERE track='{track}'"
+
+
 @router.get("/api/ai/signals")
-async def ai_signals(limit: int = Query(50, ge=1, le=200)):
-    rows = await asyncio.to_thread(db_rows, "SELECT * FROM ai_signals ORDER BY id DESC LIMIT :limit", {"limit": limit})
-    return {"signals": rows}
+async def ai_signals(limit: int = Query(50, ge=1, le=200), track: str = Query("MAIN")):
+    where = track_where(track)
+    rows = await asyncio.to_thread(
+        db_rows, f"SELECT * FROM ai_signals{where} ORDER BY id DESC LIMIT :limit", {"limit": limit}
+    )
+    return {"signals": rows, "track": track.upper()}
 
 
 @router.get("/api/ai/research/latest")
@@ -761,7 +957,8 @@ async def ai_research_latest():
 
 
 @router.get("/api/ai/stats")
-async def ai_stats():
+async def ai_stats(track: str = Query("MAIN")):
+    where = track_where(track)
     rows = await asyncio.to_thread(
         db_rows,
         "SELECT strategy, COUNT(*) AS total, "
@@ -769,7 +966,7 @@ async def ai_stats():
         "COUNT(*) FILTER (WHERE status='LOSS') AS losses, "
         "COUNT(*) FILTER (WHERE status='EXPIRED') AS expired, "
         "COUNT(*) FILTER (WHERE status='OPEN') AS open "
-        "FROM ai_signals GROUP BY strategy ORDER BY strategy",
+        f"FROM ai_signals{where} GROUP BY strategy ORDER BY strategy",
     )
     for row in rows:
         decided = row["wins"] + row["losses"]
@@ -778,8 +975,9 @@ async def ai_stats():
 
 
 @router.get("/api/ai/paper")
-async def ai_paper():
-    rows = await asyncio.to_thread(db_rows, "SELECT * FROM ai_signals ORDER BY created_at ASC, id ASC")
+async def ai_paper(track: str = Query("MAIN")):
+    where = track_where(track)
+    rows = await asyncio.to_thread(db_rows, f"SELECT * FROM ai_signals{where} ORDER BY created_at ASC, id ASC")
     risk_amount = PAPER_START_BALANCE * PAPER_RISK_PCT / 100
     closed = []
     open_trades = []

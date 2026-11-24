@@ -14,7 +14,7 @@ BRIEF_TTL = 90 * 60
 MANUAL_BRIEF_TTL = 10 * 60
 BLACKOUT_BEFORE = 20 * 60
 BLACKOUT_AFTER = 30 * 60
-MAX_REVIEWS_PER_CYCLE = 4
+MAX_REVIEWS_PER_CYCLE = int(os.getenv("MAX_REVIEWS_PER_CYCLE", "8"))
 STATE = {"brief": None, "brief_at": 0, "brief_error": None, "context": None, "reviews_ready": False, "restored": False}
 
 DDL_REVIEWS = (
@@ -387,6 +387,8 @@ async def review(row, context):
         "stop_loss": round(row["stop_loss"], 2), "take_profit": round(row["take_profit"], 2),
         "reward_to_risk": round(abs(row["take_profit"] - row["entry"]) / risk, 2) if risk else None,
         "why": row.get("reason", "")[:200],
+        "backtest_record": row.get("accuracy_note"),
+        "live_lab_record": row.get("live_note"),
     }
     brief = context.get("brief")
     data = {
@@ -397,8 +399,10 @@ async def review(row, context):
         "You are a senior gold (XAU/USD) trader doing the FINAL CHECK on an automated trade signal, thinking like a "
         "careful human analyst. Weigh: (1) the trading session and how gold usually behaves in it (Asian = quiet range, "
         "London open = expansion, London/NY overlap = most active, late NY = thin); (2) the multi-timeframe technical "
-        "picture; (3) the news and economic calendar (reject if a high-impact event is imminent or the signal fights a "
-        "clear macro bias); (4) whether the reward-to-risk and stop placement are realistic. "
+        "picture; (3) the news and economic calendar (mention an imminent high-impact event as a risk, but do not reject only "
+        "because of news; reject if the signal clearly fights a strong macro bias); (4) whether the reward-to-risk and "
+        "stop placement are realistic; (5) the strategy's backtest and live lab track record. APPROVE only when you "
+        "believe this trade has a realistic chance to reach its take-profit before its stop-loss. "
         "Use ONLY the data provided; do not invent prices or news. Return ONLY JSON: "
         '{"verdict": "APPROVE|REJECT|WAIT", "confidence": 0-100, "reason_bn": "2 short sentences in Bengali"}. '
         "Prefer REJECT or WAIT when evidence is mixed. Educational analysis, not financial advice.\n\nDATA:\n"

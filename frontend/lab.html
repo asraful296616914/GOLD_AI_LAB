@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#080d18">
+<title>GOLD AI LAB | Strategy Lab</title>
+<style>
+:root{--bg:#080d18;--card:#0f1626;--line:#1c2740;--text:#e6ebf5;--muted:#8a96b0;--gold:#f5b942;--green:#22c55e;--red:#ef4444;--gray:#64748b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Noto Sans Bengali",sans-serif;padding:16px;max-width:1100px;margin-inline:auto}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
+h1{font-size:20px;margin:0;color:var(--gold)}
+a{color:var(--gold);text-decoration:none}
+.links{display:flex;gap:14px;flex-wrap:wrap;font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--muted);letter-spacing:.04em}
+.muted{color:var(--muted);font-size:13px;line-height:1.6}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.stat{background:#0b1220;border:1px solid var(--line);border-radius:10px;padding:10px}
+.stat .k{color:var(--muted);font-size:12px}
+.stat .v{font-size:22px;font-weight:800;margin-top:2px}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700}
+.BUY,.WIN,.PROMOTED{background:rgba(34,197,94,.15);color:var(--green)}
+.SELL,.LOSS,.DEMOTED{background:rgba(239,68,68,.15);color:var(--red)}
+.OPEN,.MAIN{background:rgba(245,185,66,.15);color:var(--gold)}
+.EXPIRED,.NEUTRAL,.LAB{background:rgba(100,116,139,.2);color:var(--gray)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+td.wrap{white-space:normal;min-width:220px;color:var(--muted)}
+th{color:var(--muted);font-weight:600}
+select{background:#0f1626;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+.pos{color:var(--green)}.neg{color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <div><a href="/">← ড্যাশবোর্ড</a><h1>GOLD AI LAB · Strategy Lab</h1></div>
+  <div class="links"><a href="/signals">◉ মূল সিগন্যাল (AI-অনুমোদিত)</a></div>
+</header>
+<div class="muted" id="status">লোড হচ্ছে...</div>
+
+<div class="card"><h2>ল্যাব কীভাবে কাজ করে</h2>
+  <div class="muted" id="rules">লোড হচ্ছে...</div>
+</div>
+
+<div class="card"><h2>সারসংক্ষেপ (সব সিগন্যালের ভার্চুয়াল পেপার ট্রেড)</h2><div class="grid" id="summary"></div></div>
+
+<div class="card"><h2>AI-র "হ্যাঁ" আসলে কতটা ভালো? (শেষ হওয়া ট্রেডে)</h2><div class="grid" id="ai-effect"></div>
+  <div class="muted" style="margin-top:8px">AI যেগুলো মূল তালিকায় পাঠায়নি সেগুলোও ল্যাবে চলে, তাই দুই দলের জয়ের হার পাশাপাশি দেখা যায়।</div>
+</div>
+
+<div class="card"><h2>স্ট্র্যাটেজির অবস্থা</h2>
+  <div style="margin-bottom:8px"><select id="filter">
+    <option value="ALL">সব</option><option value="PROMOTED">প্রমোটেড (মূল তালিকায় যেতে পারে)</option>
+    <option value="DEMOTED">ডিমোটেড (আগে মূলে ছিল, এখন শর্ত পূরণ হচ্ছে না)</option><option value="LAB">ল্যাব (ডেটা কম / শর্ত পূরণ হয়নি)</option>
+  </select></div>
+  <div class="scroll"><table><thead><tr>
+    <th>কৌশল</th><th>টাইমফ্রেম</th><th>অবস্থা</th><th>লাইভ জয়%</th><th>গড় R</th><th>শেষ হওয়া ট্রেড</th><th>ব্যাকটেস্ট জয়%</th><th>মোট / জয় / হার / ওপেন</th><th>কেন ল্যাবে</th>
+  </tr></thead><tbody id="strat-rows"><tr><td colspan="9" class="muted">লোড হচ্ছে...</td></tr></tbody></table></div>
+</div>
+
+<div class="card"><h2>সাম্প্রতিক ল্যাব সিগন্যাল (বাংলাদেশ সময়)</h2>
+  <div class="scroll"><table><thead><tr>
+    <th>সময়</th><th>কৌশল</th><th>TF</th><th>দিক</th><th>ফল</th><th>তালিকা</th><th>AI</th><th>নোট</th>
+  </tr></thead><tbody id="sig-rows"><tr><td colspan="8" class="muted">লোড হচ্ছে...</td></tr></tbody></table></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = (v, d = 1) => (v === null || v === undefined ? "-" : Number(v).toFixed(d));
+const pct = (v) => (v === null || v === undefined ? "-" : Number(v).toFixed(1) + "%");
+const STATE_BN = { PROMOTED: "প্রমোটেড", DEMOTED: "ডিমোটেড", LAB: "ল্যাব" };
+const STATUS_BN = { OPEN: "চলছে", WIN: "জয়", LOSS: "হার", EXPIRED: "সময় শেষ" };
+let LAB = null;
+
+async function getJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return response.json();
+}
+function bdTime(ts) {
+  return new Date(ts * 1000).toLocaleString("bn-BD", { timeZone: "Asia/Dhaka", hour12: false, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function stat(label, value, cls = "") {
+  return `<div class="stat"><div class="k">${esc(label)}</div><div class="v ${cls}">${value}</div></div>`;
+}
+
+function renderRules(t) {
+  $("rules").innerHTML =
+    "১) সব কৌশলের সব সিগন্যাল এখানে ভার্চুয়াল পেপার ট্রেড হিসেবে চলে (আলাদা ব্যালেন্স, টেলিগ্রামে যায় না)।<br>" +
+    `২) কৌশল তখনই <b>প্রমোটেড</b> হয় যখন: ব্যাকটেস্ট জয় <b>&gt;${t.backtest_min}%</b>, শেষ ${t.window}টি শেষ-হওয়া লাইভ ল্যাব ট্রেডে জয় <b>&gt;${t.live_min}%</b>, গড় লাভ (R) <b>&gt;0</b>, এবং কমপক্ষে <b>${t.min_trades}টি</b> ট্রেড শেষ হয়েছে।<br>` +
+    "৩) প্রমোটেড কৌশলের নতুন সিগন্যাল AI-কে দেওয়া হয়। AI 'হ্যাঁ' বললে সিগন্যাল <b>মূল তালিকা, মূল চার্ট ও টেলিগ্রামে</b> যায়। না বললে ল্যাবেই থাকে (কারণসহ)।<br>" +
+    "৪) শেষ ট্রেডগুলোতে শর্ত ভেঙে গেলে কৌশল আবার ল্যাবে ফিরে যায় (ডিমোটেড)।";
+}
+
+function renderStrategies() {
+  if (!LAB) return;
+  const filter = $("filter").value;
+  const rows = LAB.strategies.filter((s) => filter === "ALL" || s.state === filter);
+  $("strat-rows").innerHTML = rows.length ? rows.map((s) => {
+    const rCls = s.window_avg_r === null ? "" : s.window_avg_r > 0 ? "pos" : "neg";
+    return `<tr>
+      <td><b>${esc(s.strategy)}</b></td><td>${esc(s.timeframe)}</td>
+      <td><span class="badge ${esc(s.state)}">${STATE_BN[s.state] || esc(s.state)}</span></td>
+      <td>${pct(s.window_accuracy)}</td><td class="${rCls}">${s.window_avg_r === null ? "-" : (s.window_avg_r > 0 ? "+" : "") + num(s.window_avg_r, 2)}</td>
+      <td>${s.window_trades}/${LAB.thresholds.window}</td>
+      <td>${pct(s.bt_accuracy)}${s.bt_sample ? ` <span class="muted">(${s.bt_sample})</span>` : ""}</td>
+      <td>${s.total} / ${s.wins} / ${s.losses} / ${s.open}</td>
+      <td class="wrap">${s.problems.length ? esc(s.problems.join("; ")) : "<span class='pos'>সব শর্ত পূরণ</span>"}</td></tr>`;
+  }).join("") : '<tr><td colspan="9" class="muted">এই ফিল্টারে কিছু নেই</td></tr>';
+}
+
+function renderSummary(lab, paper) {
+  const counts = { PROMOTED: 0, DEMOTED: 0, LAB: 0 };
+  lab.strategies.forEach((s) => { counts[s.state] += 1; });
+  const netCls = paper.net_pnl > 0 ? "pos" : paper.net_pnl < 0 ? "neg" : "";
+  $("summary").innerHTML =
+    stat("প্রমোটেড কৌশল", counts.PROMOTED, "pos") + stat("ডিমোটেড", counts.DEMOTED, counts.DEMOTED ? "neg" : "") + stat("ল্যাবে", counts.LAB) +
+    stat("ল্যাব ব্যালেন্স (ভার্চুয়াল)", "$" + num(paper.equity, 2)) +
+    stat("নিট লাভ/ক্ষতি", (paper.net_pnl > 0 ? "+" : "") + "$" + num(paper.net_pnl, 2), netCls) +
+    stat("ল্যাব জয়ের হার", pct(paper.win_rate)) + stat("শেষ হওয়া ট্রেড", paper.closed_count) + stat("চলমান", paper.open_count);
+  const e = lab.ai_effect;
+  const side = (x) => `${pct(x.accuracy)} <span class="muted">(${x.wins} জয় / ${x.losses} হার)</span>`;
+  $("ai-effect").innerHTML = stat("AI 'হ্যাঁ' বলেছে", side(e.approved)) + stat("AI মূলে পাঠায়নি", side(e.not_approved));
+}
+
+function renderSignals(list) {
+  $("sig-rows").innerHTML = list.length ? list.map((s) => `<tr>
+    <td>${bdTime(s.created_at)}</td><td><b>${esc(s.strategy)}</b></td><td>${esc(s.timeframe)}</td>
+    <td><span class="badge ${esc(s.direction)}">${esc(s.direction)}</span></td>
+    <td><span class="badge ${esc(s.status)}">${STATUS_BN[s.status] || esc(s.status)}</span></td>
+    <td><span class="badge ${esc(s.track)}">${s.track === "MAIN" ? "মূল" : "ল্যাব"}</span></td>
+    <td>${esc(s.ai_verdict || "-")}</td><td class="wrap">${esc(s.lab_note || "")}</td></tr>`).join("")
+    : '<tr><td colspan="8" class="muted">এখনো কোনো সিগন্যাল নেই</td></tr>';
+}
+
+async function load() {
+  try {
+    const [lab, paper, signals] = await Promise.all([
+      getJson("/api/ai/lab/strategies"), getJson("/api/ai/paper?track=ALL"), getJson("/api/ai/signals?track=ALL&limit=60"),
+    ]);
+    LAB = lab;
+    renderRules(lab.thresholds); renderSummary(lab, paper); renderStrategies(); renderSignals(signals.signals);
+    $("status").textContent = "সর্বশেষ আপডেট: " + bdTime(Math.floor(Date.now() / 1000)) + " (বাংলাদেশ সময়) · প্রতি ১ মিনিটে নতুন হয়";
+  } catch (error) {
+    $("status").textContent = "ডেটা লোড করা যায়নি: " + error.message;
+  }
+}
+$("filter").addEventListener("change", renderStrategies);
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>
