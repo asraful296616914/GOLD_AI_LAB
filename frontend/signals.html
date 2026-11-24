@@ -57,7 +57,18 @@ th{color:var(--muted);font-weight:600}
 </div>
 <div class="card"><h2>সর্বশেষ AI রিসার্চ</h2><div id="research" class="muted">কোনো রিসার্চ নেই</div></div>
 <div class="card"><h2>বাজারের পটভূমি (সেশন, খবর, ইকোনমিক ইভেন্ট)</h2><div id="ctx" class="muted">লোড হচ্ছে...</div></div>
-<div class="card"><h2>খবর ও ইভেন্টের ইতিহাস</h2><div id="news-hist" class="muted">লোড হচ্ছে...</div></div>
+<div class="card"><h2>ইকোনমিক ক্যালেন্ডার (Forex Factory · বাংলাদেশ সময়)</h2>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+    <select id="cal-cur" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="USD" selected>USD (সোনার জন্য সবচেয়ে জরুরি)</option><option value="ALL">সব মুদ্রা</option><option value="EUR">EUR</option><option value="GBP">GBP</option><option value="JPY">JPY</option><option value="CNY">CNY</option><option value="CHF">CHF</option><option value="AUD">AUD</option><option value="CAD">CAD</option><option value="NZD">NZD</option></select>
+    <select id="cal-imp" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:9px"><option value="MED" selected>উচ্চ + মাঝারি প্রভাব</option><option value="HIGH">শুধু উচ্চ প্রভাব</option><option value="ALL">সব প্রভাব</option></select>
+  </div>
+  <div class="muted" id="cal-status" style="margin-bottom:6px">লোড হচ্ছে...</div>
+  <div class="scroll"><table>
+    <thead><tr><th>সময় (BD)</th><th>মুদ্রা</th><th>প্রভাব</th><th>ইভেন্ট</th><th>পূর্বাভাস</th><th>আগের মান</th><th>আসল</th></tr></thead>
+    <tbody id="cal-rows"><tr><td colspan="7" class="muted">লোড হচ্ছে...</td></tr></tbody>
+  </table></div>
+</div>
+<div class="card"><h2>সেশন আউটলুক (এশিয়ান · লন্ডন · ওভারল্যাপ · নিউ ইয়র্ক)</h2><div id="outlook" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
 <div class="card"><h2>SMC বাজার অবস্থা</h2><div id="smc" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>ব্যাকটেস্ট (পুরনো ডেটায় যাচাই)</h2>
@@ -286,34 +297,87 @@ async function loadContext() {
     $("ctx").textContent = "লোড করা যায়নি";
   }
 }
-async function loadNewsHistory() {
+const IMP_CLS = { HIGH: "SELL", MEDIUM: "OPEN", LOW: "EXPIRED", HOLIDAY: "NEUTRAL" };
+const IMP_TXT = { HIGH: "উচ্চ", MEDIUM: "মাঝারি", LOW: "কম", HOLIDAY: "ছুটি" };
+const fmtBd = t => t ? new Date(t * 1000).toLocaleString("bn-BD", { timeZone: "Asia/Dhaka" }) : "-";
+const bdTime = t => new Date(t * 1000).toLocaleTimeString("bn-BD", { timeZone: "Asia/Dhaka", hour: "2-digit", minute: "2-digit", hour12: false });
+const bdDay = t => new Date(t * 1000).toLocaleDateString("bn-BD", { timeZone: "Asia/Dhaka", weekday: "long", day: "numeric", month: "long" });
+const CAL = { events: [] };
+function renderCalendar() {
+  const now = Math.floor(Date.now() / 1000);
+  const cur = $("cal-cur").value, imp = $("cal-imp").value;
+  const startToday = Math.floor((now + 21600) / 86400) * 86400 - 21600;
+  const allowed = imp === "HIGH" ? ["HIGH"] : imp === "MED" ? ["HIGH", "MEDIUM"] : ["HIGH", "MEDIUM", "LOW", "HOLIDAY"];
+  const rows = CAL.events.filter(e => e.time >= startToday && allowed.indexOf(e.impact) >= 0 && (cur === "ALL" || e.currency === cur));
+  const nextIdx = rows.findIndex(e => e.time >= now);
+  let lastDay = "", h = "";
+  rows.forEach((e, i) => {
+    const day = bdDay(e.time);
+    if (day !== lastDay) {
+      lastDay = day;
+      h += '<tr><td colspan="7" style="background:#0f1626;color:#f5b942;font-weight:700">' + esc(day) + '</td></tr>';
+    }
+    h += '<tr style="' + (e.time < now ? "opacity:.55;" : "") + (i === nextIdx ? "box-shadow:inset 3px 0 0 #f5b942;" : "") + '">'
+      + '<td>' + esc(bdTime(e.time)) + '</td><td><b>' + esc(e.currency) + '</b></td>'
+      + '<td><span class="badge ' + (IMP_CLS[e.impact] || "NEUTRAL") + '">' + (IMP_TXT[e.impact] || esc(e.impact)) + '</span></td>'
+      + '<td style="white-space:normal;min-width:180px">' + esc(e.title) + (i === nextIdx ? ' <span class="badge OPEN">পরবর্তী</span>' : '') + '</td>'
+      + '<td>' + esc(e.forecast || "-") + '</td><td>' + esc(e.previous || "-") + '</td><td>' + esc(e.actual || "-") + '</td></tr>';
+  });
+  $("cal-rows").innerHTML = h || '<tr><td colspan="7" class="muted">এই ফিল্টারে কোনো ইভেন্ট নেই</td></tr>';
+}
+async function loadCalendar() {
   try {
-    const d = await getJSON("/api/ai/news/history?limit=30");
-    const SENT = { BULLISH: "BUY", BEARISH: "SELL" };
-    let h = "";
-    if (d.events.length) {
-      h += '<div class="scroll"><table><thead><tr><th>সময়</th><th>ইভেন্ট</th><th>গুরুত্ব</th><th>প্রত্যাশা</th><th>আসল ফল</th><th>বাজারে প্রভাব / পূর্বাভাস</th></tr></thead><tbody>'
-        + d.events.map(e => '<tr><td>' + fmtTime(e.time) + '</td><td style="white-space:normal;min-width:160px">' + esc(e.name) + '</td>'
-          + '<td>' + (e.impact === "-" ? "-" : '<span class="badge ' + (e.impact === "HIGH" ? "SELL" : "OPEN") + '">' + esc(e.impact) + '</span>') + '</td>'
-          + '<td>' + esc(e.consensus || "-") + '</td><td>' + esc(e.actual || "-") + '</td>'
-          + '<td style="white-space:normal;min-width:240px">' + esc(e.reaction || e.forecast || "-") + '</td></tr>').join("")
-        + '</tbody></table></div>';
-    } else {
-      h += '<p class="muted">এখনো কোনো পুরনো ইভেন্ট জমা হয়নি। প্রতিটা নতুন ব্রিফ থেকে ইভেন্টগুলো এখানে জমতে থাকবে।</p>';
-    }
-    if (d.briefs.length) {
-      h += '<p style="margin-top:12px"><b>আগের ব্রিফ:</b></p>' + d.briefs.map(b =>
-        '<details style="margin:6px 0"><summary>' + fmtTime(b.generated_at) + ' · <span class="badge ' + (SENT[b.sentiment] || "NEUTRAL") + '">' + esc(b.sentiment) + '</span></summary>'
-        + '<p>' + esc(b.summary) + '</p>'
-        + ((b.headlines || []).length ? '<p class="muted">' + b.headlines.map(x => '• ' + esc(x)).join("<br>") + '</p>' : '')
-        + (b.outlook && b.outlook.text ? '<p class="muted">অবস্থান (' + esc(b.outlook.bias) + '): ' + esc(b.outlook.text) + '</p>' : '')
-        + '</details>').join("");
-    }
-    $("news-hist").innerHTML = h;
+    const d = await getJSON("/api/ai/calendar");
+    CAL.events = d.events || [];
+    const src = d.source === "forexfactory" ? "Forex Factory" : d.source === "gemini" ? "⚠ Forex Factory ফিড পাওয়া যায়নি, Gemini-র ফলব্যাক (কম নির্ভরযোগ্য)" : "কোনো ডেটা নেই";
+    $("cal-status").textContent = "উৎস: " + src + (d.fetched_at ? " · হালনাগাদ: " + fmtBd(d.fetched_at) : "")
+      + (d.stale ? " · ⚠ ডেটা পুরনো" : "") + (d.error ? " · সমস্যা: " + d.error : "")
+      + " · এই ফিডে \"আসল\" মান নাও থাকতে পারে।";
+    renderCalendar();
   } catch (e) {
-    $("news-hist").textContent = "লোড করা যায়নি";
+    $("cal-status").textContent = "ক্যালেন্ডার লোড করা যায়নি";
   }
 }
+let olTimer;
+async function loadOutlook() {
+  clearTimeout(olTimer);
+  let wait = 300000;
+  try {
+    const d = await getJSON("/api/ai/session-outlook");
+    const mv = x => (x == null ? "-" : "$" + x);
+    let h = "";
+    if (d.headline) h += '<p><b>' + esc(d.headline) + '</b></p>';
+    h += '<p class="muted">এখন: ' + esc(d.market_text || "-") + (d.generated_at ? ' · AI আউটলুক: ' + fmtBd(d.generated_at) : '') + '</p>';
+    if (d.stats_status === "computing" || d.stats_status === "waiting") {
+      h += '<p class="muted">গত ' + d.stats_days + ' দিনের সোনার ডেটা থেকে সেশনের হিসাব চলছে, এক-দুই মিনিট পরে দেখা যাবে...</p>';
+      wait = 8000;
+    } else if (d.outlook_status === "generating") {
+      wait = 8000;
+    }
+    if (d.error) h += '<p class="muted">⚠ ' + esc(d.error) + '</p>';
+    h += '<div class="grid">' + d.sessions.map(s => {
+      const st = s.stats, ol = s.outlook || {};
+      const stat = st && st.days
+        ? '<div class="muted" style="font-size:12px">গড় রেঞ্জ ' + mv(st.avg_range) + ' · ঊর্ধ্বমুখী ' + f1(st.up_pct) + '% দিন (' + st.days + ' দিন)</div>'
+          + '<div class="muted" style="font-size:12px">শুরুর ১ ঘণ্টা: গড় নড়াচড়া ' + mv(st.start.avg_abs) + ' · ঊর্ধ্বমুখী ' + f1(st.start.up_pct) + '%</div>'
+          + '<div class="muted" style="font-size:12px">শেষ ১ ঘণ্টা: গড় নড়াচড়া ' + mv(st.end.avg_abs) + ' · ঊর্ধ্বমুখী ' + f1(st.end.up_pct) + '%</div>'
+        : '';
+      return '<div style="border:1px solid ' + (s.is_current ? "#f5b942" : "#1c2740") + ';border-radius:10px;padding:10px">'
+        + '<div><b>' + esc(s.label) + '</b> ' + (s.is_current ? '<span class="badge OPEN">এখন চলছে</span>' : '') + '</div>'
+        + '<div class="muted" style="font-size:12px;margin-bottom:6px">বাংলাদেশ সময় ' + esc(s.bd_window) + '</div>' + stat
+        + (ol.now ? '<p><b>এখন:</b> ' + esc(ol.now) + '</p>' : '')
+        + (ol.start ? '<p><b>শুরুতে:</b> ' + esc(ol.start) + '</p>' : '')
+        + (ol.end ? '<p><b>শেষে:</b> ' + esc(ol.end) + '</p>' : '') + '</div>';
+    }).join("") + '</div>';
+    h += '<p class="muted" style="font-size:11px;margin-top:8px">এটা গত ' + d.stats_days + ' দিনের ইতিহাস আর আজকের ইভেন্ট মিলিয়ে সম্ভাবনার হিসাব, ভবিষ্যদ্বাণী বা বিনিয়োগ পরামর্শ নয়।</p>';
+    $("outlook").innerHTML = h;
+  } catch (e) {
+    $("outlook").textContent = "লোড করা যায়নি";
+  }
+  olTimer = setTimeout(loadOutlook, wait);
+}
+$("cal-cur").addEventListener("change", renderCalendar);
+$("cal-imp").addEventListener("change", renderCalendar);
 async function loadReviews() {
   try {
     const d = await getJSON("/api/ai/reviews?limit=12");
@@ -379,7 +443,7 @@ $("run").addEventListener("click", async () => {
   } catch (e) { $("msg").textContent = "ব্যর্থ: " + e.message; }
   b.disabled = false;
 });
-load(); loadBacktest(); loadTelegram(); loadNewsHistory(); setInterval(load, 30000); setInterval(loadNewsHistory, 300000);
+load(); loadBacktest(); loadTelegram(); loadCalendar(); loadOutlook(); setInterval(load, 30000); setInterval(loadCalendar, 300000);
 </script>
 </body>
 </html>

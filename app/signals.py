@@ -1092,3 +1092,9 @@ async def ai_news_history(limit: int = Query(20, ge=1, le=60)):
 @router.get("/api/ai/reviews")
 async def ai_reviews(limit: int = Query(15, ge=1, le=50)):
     return {"reviews": await analyst.recent_reviews(limit)}
+
+
+from app import ffcal, outlook  # noqa: E402
+
+router.include_router(ffcal.router)
+router.include_router(outlook.router)
