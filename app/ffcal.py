@@ -99,16 +99,20 @@ async def refresh(force=False):
                 for index, url in enumerate(FEEDS):
                     response = await client.get(url)
                     if response.status_code == 200:
-                        events += parse_feed(response.json())
+                        try:
+                            events += parse_feed(response.json())
+                        except ValueError:
+                            if index == 0:
+                                raise RuntimeError("Forex Factory ফিড JSON দেয়নি (ব্লক করা হতে পারে)")
                     elif index == 0:
-                        raise RuntimeError(f"Forex Factory ফিড HTTP {response.status_code}")
+                        raise RuntimeError(f"Forex Factory ফিড HTTP {response.status_code} (Railway-র IP ব্লক হতে পারে)")
                     if index < len(FEEDS) - 1:
                         await asyncio.sleep(1)
             if not events:
                 raise RuntimeError("ফিডে কোনো ইভেন্ট পাওয়া যায়নি")
         except Exception as error:
             logger.warning("Forex Factory feed failed: %s", error)
-            STATE["error"] = str(error)[:160]
+            STATE["error"] = (str(error) or type(error).__name__)[:160]
             STATE["next_try"] = time.time() + RETRY_AFTER_FAIL
             return
         unique = {(e["time"], e["currency"], e["title"]): e for e in events}
@@ -136,4 +140,21 @@ async def calendar_events():
         "source": source, "fetched_at": STATE["fetched_at"], "error": STATE["error"],
         "stale": bool(STATE["fetched_at"]) and time.time() - STATE["fetched_at"] > 3 * TTL,
         "now": int(time.time()), "events": events,
+    }
+
+
+@router.get("/api/ai/diag")
+async def diag():
+    import os
+    from app import analyst, gkeys, outlook
+
+    keys = await gkeys.keys_status()
+    brief = analyst.STATE.get("brief")
+    return {
+        "commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7],
+        "calendar": {"events": len(STATE["events"]), "fetched_at": STATE["fetched_at"], "error": STATE["error"]},
+        "brief": {"has": bool(brief), "at": analyst.STATE.get("brief_at"), "error": analyst.STATE.get("brief_error")},
+        "gemini_keys": {"configured": sum(1 for s in keys["slots"] if s["configured"]), "active_slot": keys["active_slot"],
+                        "paused": [s["slot"] for s in keys["slots"] if s["paused_for_seconds"]]},
+        "outlook": {"stats_error": outlook.STATE["stats_error"], "outlook_error": outlook.STATE["outlook_error"]},
     }

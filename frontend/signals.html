@@ -67,6 +67,7 @@ th{color:var(--muted);font-weight:600}
     <thead><tr><th>সময় (BD)</th><th>মুদ্রা</th><th>প্রভাব</th><th>ইভেন্ট</th><th>পূর্বাভাস</th><th>আগের মান</th><th>আসল</th></tr></thead>
     <tbody id="cal-rows"><tr><td colspan="7" class="muted">লোড হচ্ছে...</td></tr></tbody>
   </table></div>
+  <div class="muted" id="cal-diag" style="font-size:11px;margin-top:8px"></div>
 </div>
 <div class="card"><h2>সেশন আউটলুক (এশিয়ান · লন্ডন · ওভারল্যাপ · নিউ ইয়র্ক)</h2><div id="outlook" class="muted">লোড হচ্ছে...</div></div>
 <div class="card"><h2>পেপার ট্রেডিং (ভার্চুয়াল ব্যালেন্স)</h2><div id="paper" class="grid"></div><div id="paper-curve" style="margin-top:10px"></div><div class="muted" style="margin-top:8px">প্রতিটা সিগন্যাল অটো পেপার ট্রেড হিসেবে ধরা হয়। প্রতি ট্রেডে ব্যালেন্সের নির্দিষ্ট % ঝুঁকি। মেয়াদোত্তীর্ণ ট্রেড ০ ধরা হয়। এটা আসল টাকা নয়।</div></div>
@@ -335,7 +336,16 @@ async function loadCalendar() {
       + " · এই ফিডে \"আসল\" মান নাও থাকতে পারে।";
     renderCalendar();
   } catch (e) {
-    $("cal-status").textContent = "ক্যালেন্ডার লোড করা যায়নি";
+    $("cal-status").textContent = "ক্যালেন্ডার লোড করা যায়নি (" + e.message + ")";
+    $("cal-rows").innerHTML = '<tr><td colspan="7" class="muted">ক্যালেন্ডার API সাড়া দিচ্ছে না — সম্ভবত নতুন ভার্সন এখনো ডিপ্লয় হয়নি</td></tr>';
+  }
+  try {
+    const g = await getJSON("/api/ai/diag");
+    $("cal-diag").textContent = "ডিপ্লয়: " + (g.commit || "অজানা") + " · Gemini কী: " + g.gemini_keys.configured + "টি (সক্রিয় #" + g.gemini_keys.active_slot
+      + (g.gemini_keys.paused.length ? ", বিরতিতে: " + g.gemini_keys.paused.join(",") : "") + ") · ক্যালেন্ডার: " + g.calendar.events + "টি ইভেন্ট"
+      + (g.calendar.error ? " (" + g.calendar.error + ")" : "") + " · AI ব্রিফ: " + (g.brief.has ? "আছে" : "নেই" + (g.brief.error ? " (" + g.brief.error + ")" : ""));
+  } catch (e) {
+    $("cal-diag").textContent = "";
   }
 }
 let olTimer;

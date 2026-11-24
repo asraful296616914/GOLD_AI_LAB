@@ -831,13 +831,13 @@ async def start_background():
 @router.get("/signals", include_in_schema=False)
 def signals_page():
     from app import main as m
-    return FileResponse(m.FRONTEND_DIR / "signals.html")
+    return FileResponse(m.FRONTEND_DIR / "signals.html", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/lab", include_in_schema=False)
 def lab_page():
     from app import main as m
-    return FileResponse(m.FRONTEND_DIR / "lab.html")
+    return FileResponse(m.FRONTEND_DIR / "lab.html", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/ai/lab/strategies")
