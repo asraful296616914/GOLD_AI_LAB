@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#080d18">
+<title>GOLD AI LAB | Binary</title>
+<style>
+:root{--bg:#080d18;--card:#0f1626;--line:#1c2740;--text:#e6ebf5;--muted:#8a96b0;--gold:#f5b942;--green:#22c55e;--red:#ef4444;--gray:#64748b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Noto Sans Bengali",sans-serif;padding:16px;max-width:1100px;margin-inline:auto}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:14px}
+h1{font-size:20px;margin:0;color:var(--gold)}
+a{color:var(--gold);text-decoration:none}
+button{background:var(--gold);color:#111;border:0;border-radius:8px;padding:10px 14px;font-weight:700;cursor:pointer}
+button.alt{background:transparent;color:var(--gold);border:1px solid var(--gold)}
+button:disabled{opacity:.5}
+select{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.card h2{font-size:14px;margin:0 0 10px;color:var(--muted);letter-spacing:.04em}
+.muted{color:var(--muted);font-size:13px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700}
+.BUY,.WIN,.ok{background:rgba(34,197,94,.15);color:var(--green)}
+.SELL,.LOSS,.bad{background:rgba(239,68,68,.15);color:var(--red)}
+.OPEN{background:rgba(245,185,66,.15);color:var(--gold)}
+.DRAW,.VOID,.NEUTRAL{background:rgba(100,116,139,.2);color:var(--gray)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600}
+.big{font-size:26px;font-weight:800}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:8px}
+.bar>i{display:block;height:100%;background:var(--gold);width:0}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+</style>
+</head>
+<body>
+<header>
+  <div><a href="/">← ড্যাশবোর্ড</a><h1>GOLD AI LAB · Binary</h1></div>
+  <div class="row"><a href="/signals">◉ AI Signals</a><a href="/lab">⚗ স্ট্র্যাটেজি ল্যাব</a></div>
+</header>
+
+<div class="card">
+  <h2>এই পেজ কী করে</h2>
+  <div class="muted" id="about">লোড হচ্ছে...</div>
+</div>
+
+<div class="grid">
+  <div class="card"><h2>সেশন</h2><div class="big" id="sess">-</div><div class="muted" id="sessSub"></div></div>
+  <div class="card"><h2>যোগ্য কৌশল</h2><div class="big" id="appr">-</div><div class="muted" id="apprSub"></div></div>
+  <div class="card"><h2>লাইভ জয়ের হার</h2><div class="big" id="wr">-</div><div class="muted" id="wrSub"></div></div>
+  <div class="card"><h2>শেষ স্ক্যান</h2><div class="big" id="scan">-</div><div class="muted" id="scanSub"></div></div>
+</div>
+
+<div class="card">
+  <h2>ব্যাকটেস্ট</h2>
+  <div class="row">
+    <button id="runBt">▶ ব্যাকটেস্ট চালাও</button>
+    <button id="runScan" class="alt">🔍 এখনই স্ক্যান</button>
+    <span class="muted" id="btText"></span>
+  </div>
+  <div class="bar"><i id="btBar"></i></div>
+  <div class="muted" id="msg" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between;margin-bottom:10px">
+    <h2 style="margin:0">সিগন্যাল</h2>
+    <select id="pairSel"><option value="">সব পেয়ার</option></select>
+  </div>
+  <div class="scroll"><table id="sigTable"></table></div>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between;margin-bottom:10px">
+    <h2 style="margin:0">ব্যাকটেস্ট ফলাফল (৬০%+ হলে ✔ যোগ্য)</h2>
+    <label class="muted"><input type="checkbox" id="onlyOk" checked> শুধু যোগ্য</label>
+  </div>
+  <div class="scroll"><table id="btTable"></table></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let PAIRS = [];
+let BT = null;
+
+function bdTime(ts) {
+  const d = new Date((ts + 6 * 3600) * 1000);
+  return d.toISOString().slice(5, 16).replace("T", " ");
+}
+function ago(s) {
+  if (s == null) return "-";
+  if (s < 90) return s + " সেকেন্ড আগে";
+  if (s < 5400) return Math.round(s / 60) + " মিনিট আগে";
+  return Math.round(s / 3600) + " ঘণ্টা আগে";
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(data.detail || ("ত্রুটি " + r.status));
+  return data;
+}
+async function post(path) {
+  let key = sessionStorage.getItem("adminKey") || "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ admin_key: key }) });
+    } catch (e) {
+      if (attempt === 0 && /অ্যাডমিন/.test(e.message)) {
+        key = prompt("অ্যাডমিন কী দিন") || "";
+        sessionStorage.setItem("adminKey", key);
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+async function loadStatus() {
+  const s = await api("/api/binary/status");
+  PAIRS = s.pairs;
+  if ($("pairSel").options.length === 1) {
+    PAIRS.forEach((p) => $("pairSel").insertAdjacentHTML("beforeend", `<option>${esc(p)}</option>`));
+  }
+  $("about").innerHTML = `${esc(PAIRS.length)}টি মার্কেট (M5) · এক্সপায়ারি ${esc(s.expiries_min.join(" / "))} মিনিট · ট্রেড হয় <b>${esc(s.session_window_utc)} UTC</b> (লন্ডন + নিউ ইয়র্ক, এশিয়া সেশন বাদ) · ব্যাকটেস্টে জয় <b>${esc(s.min_win)}%-এর উপরে</b> (কমপক্ষে ${esc(s.min_trades)} ট্রেড) হলে তবেই কৌশলটির সিগন্যাল টেলিগ্রামে যায়।`;
+  $("sess").innerHTML = `<span class="badge ${s.session_open ? "ok" : "bad"}">${s.session_open ? "চালু" : "বন্ধ"}</span>`;
+  $("sessSub").textContent = s.session_now;
+  $("appr").textContent = s.approved_count;
+  $("apprSub").textContent = s.approved_count ? `${s.approved_pairs.length}টি পেয়ারে` : "এখনো ব্যাকটেস্ট শেষ হয়নি বা কেউ যোগ্য নয়";
+  const sc = s.scan || {};
+  $("scan").textContent = sc.last_run ? ago(Math.max(0, Math.floor(Date.now() / 1000) - sc.last_run)) : "-";
+  $("scanSub").textContent = sc.last_error ? "ত্রুটি: " + sc.last_error : (sc.last_result ? `${sc.last_result.status}${sc.last_result.new_signals != null ? " · নতুন " + sc.last_result.new_signals : ""}` : "");
+  const b = s.backtest;
+  $("btBar").style.width = (b.status === "running" ? b.progress : (b.status === "done" ? 100 : 0)) + "%";
+  $("runBt").disabled = b.status === "running";
+  $("btText").textContent = b.status === "running"
+    ? `চলছে… ${b.progress}% ${b.pair ? "(" + b.pair + ")" : ""}`
+    : (b.status === "error" ? "ত্রুটি: " + b.error : (s.backtest_age_s != null ? "শেষ ব্যাকটেস্ট: " + ago(s.backtest_age_s) : "এখনো ব্যাকটেস্ট হয়নি"));
+  return s;
+}
+
+async function loadStats() {
+  const s = await api("/api/binary/stats");
+  $("wr").textContent = s.win_rate == null ? "-" : s.win_rate + "%";
+  $("wrSub").textContent = `জয় ${s.total.WIN} · হার ${s.total.LOSS} · ড্র ${s.total.DRAW} · চলমান ${s.total.OPEN}`;
+}
+
+async function loadSignals() {
+  const pair = $("pairSel").value;
+  const data = await api("/api/binary/signals?limit=60" + (pair ? "&pair=" + encodeURIComponent(pair) : ""));
+  const rows = data.signals.map((r) => `<tr>
+    <td>${esc(bdTime(r.entry_time))}</td><td><b>${esc(r.pair)}</b></td>
+    <td><span class="badge ${r.direction}">${r.direction === "BUY" ? "CALL ⬆" : "PUT ⬇"}</span></td>
+    <td>${esc(r.expiry_min)}m</td><td>${esc(r.strategy)}</td>
+    <td>${esc(r.bt_win)}% (${esc(r.bt_trades)})</td>
+    <td><span class="badge ${esc(r.outcome)}">${esc(r.outcome)}</span></td>
+    <td>${r.telegram_sent ? "✔" : "-"}</td></tr>`).join("");
+  $("sigTable").innerHTML = `<tr><th>এন্ট্রি (BD)</th><th>পেয়ার</th><th>দিক</th><th>এক্সপায়ারি</th><th>কৌশল</th><th>ব্যাকটেস্ট</th><th>ফলাফল</th><th>TG</th></tr>`
+    + (rows || `<tr><td colspan="8" class="muted">এখনো কোনো সিগন্যাল আসেনি</td></tr>`);
+}
+
+function renderBt() {
+  if (!BT || !BT.rows) { $("btTable").innerHTML = `<tr><td class="muted">কোনো ব্যাকটেস্ট ডেটা নেই</td></tr>`; return; }
+  const pair = $("pairSel").value;
+  let rows = BT.rows.filter((r) => (!pair || r.pair === pair) && (!$("onlyOk").checked || r.approved));
+  rows.sort((a, b) => b.win_rate - a.win_rate);
+  const html = rows.slice(0, 300).map((r) => `<tr>
+    <td>${r.approved ? "✔" : ""}</td><td><b>${esc(r.pair)}</b></td><td>${esc(r.strategy)}</td><td>${esc(r.expiry_min)}m</td>
+    <td>${esc(r.trades)}</td><td><b>${esc(r.win_rate)}%</b></td><td>${esc(r.oos_win ?? "-")}% (${esc(r.oos_trades)})</td></tr>`).join("");
+  $("btTable").innerHTML = `<tr><th></th><th>পেয়ার</th><th>কৌশল</th><th>এক্সপায়ারি</th><th>ট্রেড</th><th>জয়</th><th>শেষ ৩০% অংশে</th></tr>`
+    + (html || `<tr><td colspan="7" class="muted">${$("onlyOk").checked ? "কোনো কৌশল এখনো ৬০%-এর উপরে নেই" : "ডেটা নেই"}</td></tr>`);
+}
+async function loadBt() { BT = (await api("/api/binary/backtest")).result; renderBt(); }
+
+$("pairSel").onchange = () => { loadSignals(); renderBt(); };
+$("onlyOk").onchange = renderBt;
+$("runBt").onclick = async () => {
+  try { $("msg").textContent = ""; await post("/api/binary/backtest/run"); $("msg").textContent = "ব্যাকটেস্ট শুরু হয়েছে (১৮টি পেয়ারে কয়েক মিনিট লাগতে পারে)"; refresh(); }
+  catch (e) { $("msg").textContent = e.message; }
+};
+$("runScan").onclick = async () => {
+  try { $("runScan").disabled = true; const r = await post("/api/binary/scan"); $("msg").textContent = "স্ক্যান: " + JSON.stringify(r); refresh(); }
+  catch (e) { $("msg").textContent = e.message; }
+  finally { $("runScan").disabled = false; }
+};
+
+let lastBtStatus = "";
+async function refresh() {
+  try {
+    const s = await loadStatus();
+    if (s.backtest.status !== lastBtStatus) { lastBtStatus = s.backtest.status; await loadBt(); }
+    await Promise.all([loadStats(), loadSignals()]);
+  } catch (e) { $("msg").textContent = e.message; }
+}
+loadBt().catch(() => {});
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
