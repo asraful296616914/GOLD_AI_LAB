@@ -523,6 +523,64 @@ async def start_background():
         asyncio.create_task(scan_loop())
 
 
+# ---------------------------------------------------------------- chart + market watch
+CANDLE_CACHE = {}
+MARKET_CACHE = {"at": 0.0, "data": None}
+
+
+async def chart_candles(pair, bars=300):
+    cached = CANDLE_CACHE.get(pair)
+    if cached and time.time() - cached[0] < 20:
+        return cached[1]
+    m = _m()
+    symbols = await resolve_symbols(m)
+    end = int(time.time())
+    merged = {}
+    for _ in range(4):  # step back over weekend gaps until there are enough candles
+        start = end - bars * BAR_SEC
+        for c in await backtest.fetch_range(m, symbols[pair], BASE_TF, start, end):
+            merged[c["time"]] = c
+        if len(merged) >= min(bars, 120):
+            break
+        end = start - 1
+    candles = [merged[t] for t in sorted(merged)][-bars:]
+    CANDLE_CACHE[pair] = (time.time(), candles)
+    return candles
+
+
+async def market_overview():
+    if MARKET_CACHE["data"] is not None and time.time() - MARKET_CACHE["at"] < 30:
+        return MARKET_CACHE["data"]
+    m = _m()
+    symbols = await resolve_symbols(m)
+    gate = asyncio.Semaphore(5)
+    now = int(time.time())
+
+    async def one(pair):
+        async with gate:
+            try:
+                candles = await backtest.fetch_range(m, symbols[pair], BASE_TF, now - 40 * BAR_SEC, now)
+                if not candles:
+                    return {"pair": pair, "price": None}
+                candles.sort(key=lambda c: c["time"])
+                last = candles[-1]
+                ref = candles[-13] if len(candles) >= 13 else candles[0]
+                return {
+                    "pair": pair, "price": last["close"], "time": last["time"],
+                    "change_pct": round((last["close"] - ref["close"]) / ref["close"] * 100, 3) if ref["close"] else None,
+                    "open": now - (last["time"] + BAR_SEC) < 900,
+                }
+            except Exception:
+                return {"pair": pair, "price": None}
+
+    rows = await asyncio.gather(*(one(p) for p in PAIRS))
+    for row in rows:
+        row["approved"] = sum(1 for k in APPROVED if k[0] == row["pair"])
+        row["decimals"] = decimals(row["pair"])
+    MARKET_CACHE.update(at=time.time(), data=rows)
+    return rows
+
+
 # ---------------------------------------------------------------- API
 async def _admin(request):
     try:
@@ -600,3 +658,24 @@ async def binary_stats():
         d = slot["WIN"] + slot["LOSS"]
         slot["win_rate"] = round(slot["WIN"] / d * 100, 1) if d else None
     return {"total": total, "win_rate": round(total["WIN"] / decided * 100, 1) if decided else None, "per_pair": per_pair}
+
+
+@router.get("/api/binary/candles")
+async def binary_candles(pair: str = Query("EUR/USD"), bars: int = Query(300, ge=60, le=450)):
+    if pair not in PAIRS:
+        raise HTTPException(status_code=400, detail="অজানা পেয়ার")
+    try:
+        candles = await chart_candles(pair, bars)
+    except Exception as error:
+        logger.warning("Binary candles failed for %s (%s)", pair, type(error).__name__)
+        raise HTTPException(status_code=502, detail="চার্টের ডেটা আনা যায়নি")
+    return {"pair": pair, "decimals": decimals(pair), "candles": candles}
+
+
+@router.get("/api/binary/market")
+async def binary_market():
+    try:
+        return {"markets": await market_overview(), "session_open": session_allowed(int(time.time()))}
+    except Exception as error:
+        logger.warning("Binary market failed (%s)", type(error).__name__)
+        raise HTTPException(status_code=502, detail="মার্কেটের ডেটা আনা যায়নি")
