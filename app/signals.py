@@ -61,6 +61,11 @@ LAB_LIVE_MIN = float(os.getenv("LAB_LIVE_MIN", "35"))          # live lab accura
 LAB_BACKTEST_MIN = float(os.getenv("LAB_BACKTEST_MIN", "40"))  # backtest accuracy must be ABOVE this (%)
 LAB_MIN_TRADES = int(os.getenv("LAB_MIN_TRADES", "10"))        # minimum finished live lab trades
 LAB_WINDOW = int(os.getenv("LAB_WINDOW", "20"))                # only the most recent N finished trades count
+# Starter mode: a strategy with fewer than LAB_MIN_TRADES finished lab trades has no record yet, so its signals are
+# not blocked (they still go through the AI check). Set STARTER_MODE=0 to require the full rules from day one.
+STARTER_MODE = os.getenv("STARTER_MODE", "1") == "1"
+# AI_REQUIRED=1: never send a signal when the AI could not review it (e.g. all Gemini keys are rate-limited).
+AI_REQUIRED = os.getenv("AI_REQUIRED", "0") == "1"
 TRACKS = ("MAIN", "LAB", "ALL")
 
 STATE = {"last_run": None, "last_error": None, "market_closed": False}
@@ -424,29 +429,38 @@ async def publish(row, context, diag=None):
     if event:
         note += " | ⚠ বড় ইভেন্টের কাছাকাছি: " + event["name"]
 
-    track, ai_verdict, lab_note, ai_reason = "LAB", None, "", ""
-    if problems:
+    track, ai_verdict, lab_note, ai_reason, mode = "LAB", None, "", "", None
+    starter = STARTER_MODE and rec["n"] < LAB_MIN_TRADES
+    if problems and not starter:
         lab_note = "ল্যাবে আছে: " + "; ".join(problems)
         count("lab_not_qualified")
     else:
+        warm = f"স্টার্টার মোড (লাইভ ল্যাব ট্রেড {rec['n']}/{LAB_MIN_TRADES})" if starter else "যোগ্য কৌশল"
         verdict = await analyst.review(row, context) if context else None
         if verdict and verdict["verdict"] in ("APPROVE", "REJECT", "WAIT"):
             ai_verdict, ai_reason = verdict["verdict"], verdict["reason"]
             note += " | AI যাচাই (" + ai_verdict + "): " + ai_reason
             if ai_verdict == "APPROVE":
-                track = "MAIN"
-                lab_note = "যোগ্য কৌশল + AI অনুমোদন → মূল তালিকা"
+                track, mode = "MAIN", ("starter" if starter else "ai")
+                lab_note = f"{warm} + AI অনুমোদন → মূল তালিকা"
                 row = {**row, "confidence": verdict["confidence"], "ai_confidence": verdict["confidence"]}
                 count("promoted_to_main")
             else:
-                lab_note = f"যোগ্য কৌশল, কিন্তু AI মূল তালিকায় পাঠায়নি ({ai_verdict}): {ai_reason}"
+                lab_note = f"{warm}, কিন্তু AI মূল তালিকায় পাঠায়নি ({ai_verdict}): {ai_reason}"
                 count("lab_ai_not_approved")
-        else:
-            lab_note = "যোগ্য কৌশল, কিন্তু AI যাচাই হয়নি (সীমা/ত্রুটি), তাই এবার শুধু ল্যাবে"
+        elif AI_REQUIRED:
+            lab_note = f"{warm}, কিন্তু AI যাচাই হয়নি (লিমিট/ত্রুটি) এবং AI বাধ্যতামূলক, তাই শুধু ল্যাবে"
             note += " | (AI যাচাই হয়নি)"
             count("lab_ai_unavailable")
+        else:
+            track, mode = "MAIN", ("starter_noai" if starter else "stats_noai")
+            lab_note = f"{warm}; AI যাচাই হয়নি (লিমিট/ত্রুটি), তাই AI ছাড়াই পাঠানো হলো"
+            note += " | (AI যাচাই হয়নি)"
+            count("main_without_ai")
+        if starter and problems:
+            lab_note += " | ⚠ ভবিষ্যতে শর্ত: " + "; ".join(problems)
 
-    row = {**row, "reason": note[:400], "ai_verdict": ai_verdict, "track": track, "lab_note": lab_note[:400],
+    row = {**row, "reason": note[:400], "ai_verdict": ai_verdict, "track": track, "mode": mode, "lab_note": lab_note[:400],
            "ai_reason": ai_reason, "session_text": ((context or {}).get("session") or {}).get("text"),
            "risk_event": event["name"] if event else None}
     added = await asyncio.to_thread(insert_signal, row)
@@ -740,9 +754,18 @@ async def run_cycle(auto=False, light=False):
                 "confidence": gemini["confidence"], "reason": gemini["summary"][:400],
             }
             gemini_row.update(await live_estimate("GEMINI_V1"))
-            gemini_row["track"] = "LAB"
-            gemini_row["lab_note"] = "Gemini-র নিজস্ব সিগন্যাল ব্যাকটেস্ট করা যায় না, তাই শুধু ল্যাবে"
-            await asyncio.to_thread(insert_signal, gemini_row)
+            if STARTER_MODE:  # the AI's own call: cannot be backtested, so it goes out in starter mode
+                gemini_row.update(
+                    track="MAIN", mode="gemini", ai_verdict="APPROVE", ai_confidence=gemini["confidence"],
+                    ai_reason=gemini["summary"][:260], lab_note="Gemini AI-র নিজস্ব সিগন্যাল (ব্যাকটেস্ট করা যায় না)",
+                    session_text=((context or {}).get("session") or {}).get("text"),
+                )
+            else:
+                gemini_row["track"] = "LAB"
+                gemini_row["lab_note"] = "Gemini-র নিজস্ব সিগন্যাল ব্যাকটেস্ট করা যায় না, তাই শুধু ল্যাবে"
+            if await asyncio.to_thread(insert_signal, gemini_row) and gemini_row["track"] == "MAIN":
+                created.append("GEMINI_V1")
+                asyncio.create_task(notify.notify_new(gemini_row))
 
         for tf in LIVE_TFS:
             base = candles.get(tf)
@@ -891,18 +914,20 @@ async def ai_lab_strategies():
             "lifetime_accuracy": round(g["wins"] / decided * 100, 1) if decided else None,
             "window_trades": rec["n"], "window_accuracy": rec["accuracy"], "window_avg_r": rec["avg_r"],
             "bt_accuracy": bt_acc, "bt_sample": bt_n,
-            "state": "PROMOTED" if not problems else ("DEMOTED" if g["main_count"] else "LAB"),
+            "state": "PROMOTED" if not problems else (
+                "STARTER" if STARTER_MODE and rec["n"] < LAB_MIN_TRADES else ("DEMOTED" if g["main_count"] else "LAB")),
             "problems": problems,
         })
         out.append(g)
-    order = {"PROMOTED": 0, "DEMOTED": 1, "LAB": 2}
+    order = {"PROMOTED": 0, "STARTER": 1, "DEMOTED": 2, "LAB": 3}
     out.sort(key=lambda g: (order[g["state"]], -(g["window_accuracy"] or 0), g["strategy"]))
     for side in effect.values():
         decided = side["wins"] + side["losses"]
         side["accuracy"] = round(side["wins"] / decided * 100, 1) if decided else None
     return {
         "thresholds": {"live_min": LAB_LIVE_MIN, "backtest_min": LAB_BACKTEST_MIN,
-                       "min_trades": LAB_MIN_TRADES, "window": LAB_WINDOW},
+                       "min_trades": LAB_MIN_TRADES, "window": LAB_WINDOW,
+                       "starter_mode": STARTER_MODE, "ai_required": AI_REQUIRED},
         "strategies": out, "ai_effect": effect,
     }
 
@@ -919,7 +944,8 @@ def ai_status():
         "market_closed": STATE["market_closed"],
         "strict_gate": STRICT_GATE,
         "lab": {"live_min": LAB_LIVE_MIN, "backtest_min": LAB_BACKTEST_MIN,
-                "min_trades": LAB_MIN_TRADES, "window": LAB_WINDOW},
+                "min_trades": LAB_MIN_TRADES, "window": LAB_WINDOW,
+                       "starter_mode": STARTER_MODE, "ai_required": AI_REQUIRED},
         "backtest_auto_hours": backtest.AUTO_HOURS if backtest.AUTO else None,
         "approved": {
             TF_LABEL.get(tf, tf): sorted(entry[1]["approved"])

@@ -32,7 +32,9 @@ td.wrap{white-space:normal;min-width:220px;color:var(--muted)}
 th{color:var(--muted);font-weight:600}
 select{background:#0f1626;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px}
 .pos{color:var(--green)}.neg{color:var(--red)}
+.STARTER{background:rgba(96,165,250,.15);color:#60a5fa}
 </style>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 <header>
@@ -40,6 +42,21 @@ select{background:#0f1626;color:var(--text);border:1px solid var(--line);border-
   <div class="links"><a href="/signals">◉ মূল সিগন্যাল (AI-অনুমোদিত)</a></div>
 </header>
 <div class="muted" id="status">লোড হচ্ছে...</div>
+
+<div class="card"><h2>মার্কেট (লাইভ): এখন কতগুলো ট্রেড চলছে</h2>
+  <div class="grid" id="mkt-stats"></div>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:12px 0 8px">
+    <select id="mkt-res"><option value="5" selected>M5</option><option value="15">M15</option><option value="60">H1</option></select>
+    <label class="muted"><input type="checkbox" id="mkt-main" checked> মূল ট্রেডের লাইন (এন্ট্রি / SL / TP)</label>
+    <label class="muted"><input type="checkbox" id="mkt-lab"> ল্যাব ট্রেডের লাইন</label>
+    <span class="muted" id="mkt-note"></span>
+  </div>
+  <div id="mkt-chart" style="height:360px;border:1px solid var(--line);border-radius:10px;overflow:hidden"></div>
+  <div class="muted" style="margin-top:6px">চার্টের সময় বাংলাদেশ সময়ে। তীরচিহ্ন = চলমান ট্রেডের এন্ট্রি (সোনালি ★ = মূল, ধূসর = ল্যাব)। প্রতি ৩০ সেকেন্ডে নতুন হয়।</div>
+  <div class="scroll" style="margin-top:10px"><table><thead><tr>
+    <th>সময়</th><th>কৌশল</th><th>TF</th><th>দিক</th><th>তালিকা</th><th>এন্ট্রি</th><th>SL</th><th>TP</th><th>এখন (R)</th>
+  </tr></thead><tbody id="open-rows"><tr><td colspan="9" class="muted">লোড হচ্ছে...</td></tr></tbody></table></div>
+</div>
 
 <div class="card"><h2>ল্যাব কীভাবে কাজ করে</h2>
   <div class="muted" id="rules">লোড হচ্ছে...</div>
@@ -54,6 +71,7 @@ select{background:#0f1626;color:var(--text);border:1px solid var(--line);border-
 <div class="card"><h2>স্ট্র্যাটেজির অবস্থা</h2>
   <div style="margin-bottom:8px"><select id="filter">
     <option value="ALL">সব</option><option value="PROMOTED">প্রমোটেড (মূল তালিকায় যেতে পারে)</option>
+    <option value="STARTER">স্টার্টার (লাইভ ট্রেড ১০টির কম, নিয়ম শিথিল)</option>
     <option value="DEMOTED">ডিমোটেড (আগে মূলে ছিল, এখন শর্ত পূরণ হচ্ছে না)</option><option value="LAB">ল্যাব (ডেটা কম / শর্ত পূরণ হয়নি)</option>
   </select></div>
   <div class="scroll"><table><thead><tr>
@@ -72,7 +90,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const num = (v, d = 1) => (v === null || v === undefined ? "-" : Number(v).toFixed(d));
 const pct = (v) => (v === null || v === undefined ? "-" : Number(v).toFixed(1) + "%");
-const STATE_BN = { PROMOTED: "প্রমোটেড", DEMOTED: "ডিমোটেড", LAB: "ল্যাব" };
+const STATE_BN = { PROMOTED: "প্রমোটেড", STARTER: "স্টার্টার", DEMOTED: "ডিমোটেড", LAB: "ল্যাব" };
 const STATUS_BN = { OPEN: "চলছে", WIN: "জয়", LOSS: "হার", EXPIRED: "সময় শেষ" };
 let LAB = null;
 
@@ -90,10 +108,10 @@ function stat(label, value, cls = "") {
 
 function renderRules(t) {
   $("rules").innerHTML =
-    "১) সব কৌশলের সব সিগন্যাল এখানে ভার্চুয়াল পেপার ট্রেড হিসেবে চলে (আলাদা ব্যালেন্স, টেলিগ্রামে যায় না)।<br>" +
-    `২) কৌশল তখনই <b>প্রমোটেড</b> হয় যখন: ব্যাকটেস্ট জয় <b>&gt;${t.backtest_min}%</b>, শেষ ${t.window}টি শেষ-হওয়া লাইভ ল্যাব ট্রেডে জয় <b>&gt;${t.live_min}%</b>, গড় লাভ (R) <b>&gt;0</b>, এবং কমপক্ষে <b>${t.min_trades}টি</b> ট্রেড শেষ হয়েছে।<br>` +
-    "৩) প্রমোটেড কৌশলের নতুন সিগন্যাল AI-কে দেওয়া হয়। AI 'হ্যাঁ' বললে সিগন্যাল <b>মূল তালিকা, মূল চার্ট ও টেলিগ্রামে</b> যায়। না বললে ল্যাবেই থাকে (কারণসহ)।<br>" +
-    "৪) শেষ ট্রেডগুলোতে শর্ত ভেঙে গেলে কৌশল আবার ল্যাবে ফিরে যায় (ডিমোটেড)।";
+    "১) সব কৌশলের সব সিগন্যাল এখানে ভার্চুয়াল পেপার ট্রেড হিসেবে চলে। এখান থেকে লাইভ জয়ের হার ও গড় R বের হয়।<br>" +
+    `২) <b>স্টার্টার মোড${t.starter_mode ? " (চালু)" : " (বন্ধ)"}:</b> যে কৌশলের লাইভ ল্যাব ট্রেড ${t.min_trades}টির কম, তার সিগন্যাল আটকানো হয় না, AI অনুমোদন করলে (বা AI-র লিমিট শেষ হলে) মূল তালিকা ও টেলিগ্রামে যায়। টেলিগ্রামে "স্টার্টার" লেখা থাকে।<br>` +
+    `৩) <b>${t.min_trades}টি ট্রেড শেষ হলে</b> কৌশল তখনই <b>প্রমোটেড</b> থাকে যখন ব্যাকটেস্ট জয় <b>&gt;${t.backtest_min}%</b>, শেষ ${t.window}টি ট্রেডে লাইভ জয় <b>&gt;${t.live_min}%</b> এবং গড় R <b>&gt;0</b>। এরপর AI 'হ্যাঁ' বললে সিগন্যাল যায়${t.ai_required ? "" : " (AI-র লিমিট শেষ থাকলে পরিসংখ্যানে যোগ্য কৌশলের সিগন্যাল AI ছাড়াই যায়)"}।<br>` +
+    "৪) শর্ত ভেঙে গেলে কৌশল আবার ল্যাবে ফিরে যায় (ডিমোটেড)। AI 'না' বললে সিগন্যাল শুধু ল্যাবে থাকে (কারণসহ)।";
 }
 
 function renderStrategies() {
@@ -114,11 +132,11 @@ function renderStrategies() {
 }
 
 function renderSummary(lab, paper) {
-  const counts = { PROMOTED: 0, DEMOTED: 0, LAB: 0 };
+  const counts = { PROMOTED: 0, STARTER: 0, DEMOTED: 0, LAB: 0 };
   lab.strategies.forEach((s) => { counts[s.state] += 1; });
   const netCls = paper.net_pnl > 0 ? "pos" : paper.net_pnl < 0 ? "neg" : "";
   $("summary").innerHTML =
-    stat("প্রমোটেড কৌশল", counts.PROMOTED, "pos") + stat("ডিমোটেড", counts.DEMOTED, counts.DEMOTED ? "neg" : "") + stat("ল্যাবে", counts.LAB) +
+    stat("প্রমোটেড কৌশল", counts.PROMOTED, "pos") + stat("স্টার্টার (ডেটা জমছে)", counts.STARTER) + stat("ডিমোটেড", counts.DEMOTED, counts.DEMOTED ? "neg" : "") + stat("ল্যাবে", counts.LAB) +
     stat("ল্যাব ব্যালেন্স (ভার্চুয়াল)", "$" + num(paper.equity, 2)) +
     stat("নিট লাভ/ক্ষতি", (paper.net_pnl > 0 ? "+" : "") + "$" + num(paper.net_pnl, 2), netCls) +
     stat("ল্যাব জয়ের হার", pct(paper.win_rate)) + stat("শেষ হওয়া ট্রেড", paper.closed_count) + stat("চলমান", paper.open_count);
@@ -149,6 +167,95 @@ async function load() {
     $("status").textContent = "ডেটা লোড করা যায়নি: " + error.message;
   }
 }
+
+// ---------------------------------------------------------------- live market card + chart
+const BD_SHIFT = 6 * 3600;
+let mChart = null, mSeries = null, mLines = [], mFirst = true;
+function initMarketChart() {
+  if (mChart) return true;
+  if (!window.LightweightCharts) {
+    $("mkt-chart").innerHTML = '<div class="muted" style="padding:14px">চার্ট লাইব্রেরি লোড হয়নি (ইন্টারনেট/CDN সমস্যা)</div>';
+    return false;
+  }
+  mChart = LightweightCharts.createChart($("mkt-chart"), {
+    height: 360, layout: { background: { color: "#0f1626" }, textColor: "#8a96b0" },
+    grid: { vertLines: { color: "#1c2740" }, horzLines: { color: "#1c2740" } },
+    rightPriceScale: { borderColor: "#1c2740" }, timeScale: { borderColor: "#1c2740", timeVisible: true, secondsVisible: false },
+  });
+  mSeries = mChart.addCandlestickSeries({ upColor: "#22c55e", downColor: "#ef4444", borderVisible: false, wickUpColor: "#22c55e", wickDownColor: "#ef4444" });
+  if (window.ResizeObserver) new ResizeObserver(() => mChart.applyOptions({ width: $("mkt-chart").clientWidth })).observe($("mkt-chart"));
+  return true;
+}
+function renderMarketStats(open, all, last) {
+  const buy = open.filter((s) => s.direction === "BUY").length;
+  const mainOpen = open.filter((s) => s.track === "MAIN").length;
+  const dayStart = Math.floor((Date.now() / 1000 + BD_SHIFT) / 86400) * 86400 - BD_SHIFT;
+  const today = all.filter((s) => s.created_at >= dayStart);
+  const done = all.filter((s) => s.closed_at && s.closed_at >= dayStart && (s.status === "WIN" || s.status === "LOSS"));
+  const wins = done.filter((s) => s.status === "WIN").length;
+  $("mkt-stats").innerHTML =
+    stat("এখন চলমান ট্রেড", open.length) + stat("মূল তালিকায় চলমান", mainOpen) + stat("ল্যাবে চলমান", open.length - mainOpen) +
+    stat("BUY / SELL", buy + " / " + (open.length - buy)) + stat("আজ নতুন সিগন্যাল", today.length) +
+    stat("আজ শেষ হয়েছে (জয় / হার)", wins + " / " + (done.length - wins)) + stat("সর্বশেষ দাম", last == null ? "-" : "$" + num(last, 2));
+}
+function renderOpenTrades(open, last) {
+  $("open-rows").innerHTML = open.length ? open.slice(0, 40).map((s) => {
+    const risk = Math.abs(s.entry - s.stop_loss);
+    const fl = last != null && risk ? ((s.direction === "BUY" ? last - s.entry : s.entry - last) / risk) : null;
+    const cls = fl === null ? "" : fl > 0 ? "pos" : fl < 0 ? "neg" : "";
+    return `<tr><td>${bdTime(s.created_at)}</td><td><b>${esc(s.strategy)}</b></td><td>${esc(s.timeframe)}</td>
+      <td><span class="badge ${esc(s.direction)}">${esc(s.direction)}</span></td>
+      <td><span class="badge ${esc(s.track)}">${s.track === "MAIN" ? "মূল" : "ল্যাব"}</span></td>
+      <td>${num(s.entry, 2)}</td><td>${num(s.stop_loss, 2)}</td><td>${num(s.take_profit, 2)}</td>
+      <td class="${cls}">${fl === null ? "-" : (fl > 0 ? "+" : "") + num(fl, 2) + "R"}</td></tr>`;
+  }).join("") : '<tr><td colspan="9" class="muted">এই মুহূর্তে কোনো চলমান ট্রেড নেই</td></tr>';
+}
+function drawTradeOverlay(open, bars, resSec) {
+  mLines.forEach((line) => { try { mSeries.removePriceLine(line); } catch (e) { /* already removed */ } });
+  mLines = [];
+  const firstT = bars[0].time, lastT = bars[bars.length - 1].time, markers = [];
+  open.forEach((s) => {
+    const main = s.track === "MAIN";
+    const t = Math.floor((s.created_at + BD_SHIFT) / resSec) * resSec;
+    if (t >= firstT && t <= lastT) {
+      markers.push({ time: t, position: s.direction === "BUY" ? "belowBar" : "aboveBar", shape: s.direction === "BUY" ? "arrowUp" : "arrowDown",
+        color: main ? "#f5b942" : "#64748b", text: main ? "★" : "" });
+    }
+    if ((main && $("mkt-main").checked) || (!main && $("mkt-lab").checked)) {
+      const line = (price, color, title, style) => mLines.push(mSeries.createPriceLine({
+        price, color, lineWidth: main ? 2 : 1, lineStyle: style, axisLabelVisible: main, title }));
+      line(s.entry, main ? "#f5b942" : "#64748b", s.strategy + " " + s.direction, 0);
+      line(s.stop_loss, "#ef4444", "SL", 2);
+      line(s.take_profit, "#22c55e", "TP", 2);
+    }
+  });
+  markers.sort((a, b) => a.time - b.time);
+  mSeries.setMarkers(markers);
+}
+async function loadMarket() {
+  try {
+    const res = $("mkt-res").value;
+    const [hist, sg] = await Promise.all([getJson(`/api/market/history?resolution=${res}&bars=300`), getJson("/api/ai/signals?track=ALL&limit=200")]);
+    const bars = (hist.bars || []).map((b) => ({ time: b.time + BD_SHIFT, open: b.open, high: b.high, low: b.low, close: b.close }));
+    const last = bars.length ? bars[bars.length - 1].close : null;
+    const open = sg.signals.filter((s) => s.status === "OPEN");
+    renderMarketStats(open, sg.signals, last);
+    renderOpenTrades(open, last);
+    if (initMarketChart() && bars.length) {
+      mSeries.setData(bars);
+      drawTradeOverlay(open, bars, Number(res) * 60);
+      if (mFirst) { mChart.timeScale().fitContent(); mFirst = false; }
+    }
+    $("mkt-note").textContent = "";
+  } catch (error) {
+    $("mkt-note").textContent = "মার্কেট ডেটা লোড করা যায়নি: " + error.message;
+  }
+}
+$("mkt-res").addEventListener("change", () => { mFirst = true; loadMarket(); });
+$("mkt-main").addEventListener("change", loadMarket);
+$("mkt-lab").addEventListener("change", loadMarket);
+loadMarket();
+setInterval(loadMarket, 30000);
 $("filter").addEventListener("change", renderStrategies);
 load();
 setInterval(load, 60000);

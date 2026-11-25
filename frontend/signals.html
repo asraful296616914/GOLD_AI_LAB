@@ -270,7 +270,7 @@ async function loadContext() {
     let h = '<p><b>' + esc(s.text || "-") + '</b> <span class="muted">(UTC ' + esc(s.utc_hour) + ':00)</span></p>'
       + '<p class="muted">পরের লন্ডন ওপেন: ' + mins(s.minutes_to_london_open) + ' · নিউ ইয়র্ক ওপেন: ' + mins(s.minutes_to_ny_open)
       + (s.asian_range != null ? ' · এশিয়ান রেঞ্জ: $' + s.asian_range + ' (ATR-এর ' + s.asian_vs_atr + ' গুণ)' : '') + '</p>';
-    if (c.blackout) h += '<p style="color:#ef4444"><b>⚠ বড় ইভেন্টের কাছাকাছি সময়: ' + esc(c.blackout.name) + ' — নতুন সিগন্যাল বন্ধ</b></p>';
+    if (c.blackout) h += '<p style="color:#ef4444"><b>⚠ বড় ইভেন্টের কাছাকাছি সময়: ' + esc(c.blackout.name) + ' — সতর্ক থাকুন (সিগন্যাল বন্ধ নয়)</b></p>';
     const b = c.brief;
     if (b) {
       const cls = { BULLISH: "BUY", BEARISH: "SELL", NEUTRAL: "NEUTRAL" }[b.sentiment] || "NEUTRAL";

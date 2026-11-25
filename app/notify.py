@@ -92,8 +92,16 @@ def format_new(row):
     reward = abs(row["take_profit"] - row["entry"])
     rr = f"{reward / risk:.1f}" if risk else "-"
     icon = "🟢" if row["direction"] == "BUY" else "🔴"
+    titles = {
+        "ai": "✅ AI-অনুমোদিত সিগন্যাল",
+        "starter": "🧪 স্টার্টার সিগন্যাল (AI অনুমোদিত)",
+        "starter_noai": "🧪 স্টার্টার সিগন্যাল (AI যাচাই ছাড়া)",
+        "stats_noai": "📈 যোগ্য কৌশলের সিগন্যাল (AI যাচাই ছাড়া)",
+        "gemini": "🤖 Gemini AI সিগন্যাল",
+    }
+    title = titles.get(row.get("mode"), "✅ AI-অনুমোদিত সিগন্যাল")
     lines = [
-        f"{icon} <b>AI-অনুমোদিত সিগন্যাল: {_esc(row['direction'])}</b> (XAU/USD · {_esc(row.get('timeframe', ''))})",
+        f"{icon} <b>{title}: {_esc(row['direction'])}</b> (XAU/USD · {_esc(row.get('timeframe', ''))})",
         f"কৌশল: <b>{_esc(row['strategy'])}</b>",
         f"এন্ট্রি: <code>{row['entry']:.2f}</code>",
         f"SL: <code>{row['stop_loss']:.2f}</code> · TP: <code>{row['take_profit']:.2f}</code>",
@@ -110,8 +118,12 @@ def format_new(row):
         lines.append("📊 " + " · ".join(record))
     if row.get("session_text"):
         lines.append("🕒 " + _esc(row["session_text"]))
+    if str(row.get("mode") or "").startswith("starter"):
+        lines.append(f"⚠️ এই কৌশলের লাইভ ট্রেড এখনো {_esc(row.get('live_sample') or 0)}টি (১০টির কম), তাই ফলাফল অনিশ্চিত")
     if row.get("ai_reason"):
         lines.append("🤖 AI: " + _esc(str(row["ai_reason"])[:260]))
+    elif row.get("mode") in ("starter_noai", "stats_noai"):
+        lines.append("🤖 AI যাচাই হয়নি (Gemini লিমিট/ত্রুটি)")
     if row.get("risk_event"):
         lines.append("⚠️ কাছাকাছি বড় খবর: " + _esc(row["risk_event"]) + " — ঝুঁকি বেশি, সাবধান")
     lines.append("⚠️ শিক্ষামূলক বিশ্লেষণ, বিনিয়োগ পরামর্শ নয়")
