@@ -118,21 +118,30 @@ def decimals(pair):
 
 
 # ---------------------------------------------------------------- data
+FEEDS = {}        # pair -> {"id": pyth_lazer_id, "channel": min_channel}
+FEED_RETRY = {}
+
+
 async def resolve_symbols(m):
-    """Pyth symbol for each pair (default FX.EUR/USD); validated once through /symbols."""
+    """Pyth symbol + live feed id for each pair (default symbol FX.EUR/USD); verified through /symbols."""
     for pair in PAIRS:
-        if pair in SYMBOLS:
+        if pair in SYMBOLS and (pair in FEEDS or time.time() - FEED_RETRY.get(pair, 0) < 600):
             continue
-        symbol = f"FX.{pair}"
+        FEED_RETRY[pair] = time.time()
+        symbol = SYMBOLS.get(pair) or f"FX.{pair}"
         try:
             response = await m.pyth_get("/symbols", params={"query": pair, "asset_type": "fx"})
             if response.status_code == 200:
                 data = response.json()
-                names = [str(item.get("symbol")) for item in data] if isinstance(data, list) else []
+                items = [i for i in data if isinstance(i, dict)] if isinstance(data, list) else []
+                names = [str(i.get("symbol")) for i in items]
                 if symbol not in names:
                     match = [n for n in names if n.endswith(pair)]
                     if match:
                         symbol = match[0]
+                item = next((i for i in items if i.get("symbol") == symbol), None)
+                if item and item.get("pyth_lazer_id") is not None:
+                    FEEDS[pair] = {"id": int(item["pyth_lazer_id"]), "channel": item.get("min_channel") or m.PYTH_CHANNEL}
         except Exception:
             logger.warning("Could not verify Pyth symbol for %s, using %s", pair, symbol)
         SYMBOLS[pair] = symbol
@@ -518,6 +527,7 @@ async def start_background():
     except Exception:
         logger.exception("Could not prepare binary tables")
         return
+    asyncio.create_task(live_loop())
     if AUTO:
         asyncio.create_task(backtest_loop())
         asyncio.create_task(scan_loop())
@@ -566,7 +576,7 @@ async def market_overview():
                 last = candles[-1]
                 ref = candles[-13] if len(candles) >= 13 else candles[0]
                 return {
-                    "pair": pair, "price": last["close"], "time": last["time"],
+                    "pair": pair, "price": last["close"], "time": last["time"], "ref_price": ref["close"],
                     "change_pct": round((last["close"] - ref["close"]) / ref["close"] * 100, 3) if ref["close"] else None,
                     "open": now - (last["time"] + BAR_SEC) < 900,
                 }
@@ -579,6 +589,77 @@ async def market_overview():
         row["decimals"] = decimals(row["pair"])
     MARKET_CACHE.update(at=time.time(), data=rows)
     return rows
+
+
+# ---------------------------------------------------------------- live price stream (all 18 pairs, one websocket)
+LIVE = {}   # pair -> {"price", "ts", "recv"}
+LIVE_STATE = {"status": "idle", "error": None, "since": None}
+
+
+async def live_loop():
+    import websockets
+
+    api_key = os.getenv("PYTH_API_KEY", "").strip()
+    if not api_key:
+        LIVE_STATE.update(status="no_key", error="PYTH_API_KEY নেই")
+        return
+    m = _m()
+    index = 0
+    while True:
+        try:
+            await resolve_symbols(m)
+            by_channel, id_to_pair = {}, {}
+            for pair in PAIRS:
+                feed = FEEDS.get(pair)
+                if feed:
+                    by_channel.setdefault(feed["channel"], []).append(feed["id"])
+                    id_to_pair[feed["id"]] = pair
+            if not by_channel:
+                LIVE_STATE.update(status="no_feeds", error="Pyth ফিড আইডি পাওয়া যায়নি")
+                await asyncio.sleep(60)
+                continue
+            url = m.PYTH_WS_URLS[index % len(m.PYTH_WS_URLS)]
+            async with websockets.connect(
+                url, additional_headers={"Authorization": f"Bearer {api_key}"},
+                ping_interval=20, ping_timeout=20, close_timeout=5, max_size=2**21,
+            ) as ws:
+                for number, (channel, ids) in enumerate(by_channel.items(), 1):
+                    await ws.send(json.dumps({
+                        "type": "subscribe", "subscriptionId": number, "priceFeedIds": ids,
+                        "properties": ["price", "exponent", "feedUpdateTimestamp"], "formats": [],
+                        "channel": channel, "ignoreInvalidFeeds": True, "deliveryFormat": "json", "parsed": True,
+                    }))
+                LIVE_STATE.update(status="connected", error=None, since=time.time())
+                async for raw in ws:
+                    try:
+                        message = json.loads(raw)
+                    except (ValueError, TypeError):
+                        continue
+                    kind = message.get("type")
+                    if kind == "subscriptionError":
+                        LIVE_STATE["error"] = str(message)[:300]
+                        continue
+                    if kind != "streamUpdated":
+                        continue
+                    parsed = message.get("parsed") or {}
+                    ts = (int(parsed.get("timestampUs") or 0) / 1e6) or time.time()
+                    for feed in parsed.get("priceFeeds") or []:
+                        try:
+                            pair = id_to_pair.get(int(feed.get("priceFeedId", -1)))
+                            price, exponent = feed.get("price"), feed.get("exponent")
+                            if pair is None or price is None or exponent is None:
+                                continue
+                            LIVE[pair] = {"price": float(price) * (10 ** int(exponent)), "ts": ts, "recv": time.time()}
+                        except (TypeError, ValueError):
+                            continue
+                    LIVE_STATE["status"] = "streaming"
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            LIVE_STATE.update(status="reconnecting", error=type(error).__name__)
+            logger.warning("Binary live stream disconnected (%s)", type(error).__name__)
+            index += 1
+            await asyncio.sleep(3)
 
 
 # ---------------------------------------------------------------- API
@@ -607,7 +688,7 @@ async def binary_status():
         "auto": AUTO, "backtest": dict(STATE),
         "backtest_age_s": (now - data["created_at"]) if data else None,
         "approved_count": len(APPROVED), "approved_pairs": sorted({k[0] for k in APPROVED}),
-        "scan": dict(SCAN),
+        "scan": dict(SCAN), "live": {"status": LIVE_STATE["status"], "error": LIVE_STATE["error"]},
     }
 
 
@@ -679,3 +760,12 @@ async def binary_market():
     except Exception as error:
         logger.warning("Binary market failed (%s)", type(error).__name__)
         raise HTTPException(status_code=502, detail="মার্কেটের ডেটা আনা যায়নি")
+
+
+@router.get("/api/binary/live")
+async def binary_live():
+    now = time.time()
+    return {
+        "status": LIVE_STATE["status"], "error": LIVE_STATE["error"], "now": int(now),
+        "prices": {pair: {"price": v["price"], "ts": v["ts"], "age": round(now - v["recv"], 1)} for pair, v in LIVE.items()},
+    }

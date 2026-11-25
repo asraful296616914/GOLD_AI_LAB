@@ -37,6 +37,9 @@ th{color:var(--muted);font-weight:600}
 #chart{height:420px;width:100%}
 .mk{cursor:pointer}.mk:hover{background:rgba(245,185,66,.07)}.mk.sel{background:rgba(245,185,66,.14)}
 .up{color:var(--green)}.dn{color:var(--red)}
+.flash-up{animation:fu .5s}.flash-dn{animation:fd .5s}
+@keyframes fu{from{background:rgba(34,197,94,.35)}to{background:transparent}}
+@keyframes fd{from{background:rgba(239,68,68,.35)}to{background:transparent}}
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:8px}
 </style>
 </head>
@@ -68,7 +71,7 @@ th{color:var(--muted);font-weight:600}
 
 <div class="card">
   <div class="row" style="justify-content:space-between;margin-bottom:10px">
-    <h2 style="margin:0" id="chartTitle">চার্ট · M5</h2>
+    <div class="row"><h2 style="margin:0" id="chartTitle">চার্ট · M5</h2><span class="badge NEUTRAL" id="liveTag">সংযোগ হচ্ছে…</span><b id="livePrice" style="color:var(--gold)"></b></div>
     <select id="chartSel"></select>
   </div>
   <div id="chart"></div>
@@ -221,7 +224,7 @@ $("runScan").onclick = async () => {
 
 // ---------------- market watch + chart
 const OFF = 6 * 3600;
-let chart = null, series = null, curPair = "EUR/USD", lastStats = {};
+let chart = null, series = null, curPair = "EUR/USD", lastStats = {}, bars = [], marketRows = {}, decimals = 5;
 function initChart() {
   if (chart || !window.LightweightCharts) return;
   chart = LightweightCharts.createChart($("chart"), {
@@ -236,17 +239,22 @@ function initChart() {
 const OUT_COLOR = { WIN: "#22c55e", LOSS: "#ef4444", OPEN: "#f5b942", DRAW: "#64748b", VOID: "#64748b" };
 const OUT_TEXT = { WIN: "জয়", LOSS: "হার", OPEN: "চলমান", DRAW: "ড্র", VOID: "বাতিল" };
 
-async function loadChart() {
+let chartReq = 0;
+async function loadChart(reset) {
   initChart();
   if (!series) { $("chartMsg").textContent = "চার্ট লাইব্রেরি লোড হয়নি (ইন্টারনেট চেক করুন)"; return; }
+  const my = ++chartReq;
   try {
     const [cd, sg] = await Promise.all([
       api("/api/binary/candles?pair=" + encodeURIComponent(curPair)),
       api("/api/binary/signals?limit=200&pair=" + encodeURIComponent(curPair)),
     ]);
+    if (my !== chartReq) return;
     const d = cd.decimals;
+    decimals = d;
     series.applyOptions({ priceFormat: { type: "price", precision: d, minMove: 1 / Math.pow(10, d) } });
-    series.setData(cd.candles.map((c) => ({ time: c.time + OFF, open: c.open, high: c.high, low: c.low, close: c.close })));
+    bars = cd.candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
+    series.setData(bars.map((c) => ({ ...c, time: c.time + OFF })));
     const first = cd.candles.length ? cd.candles[0].time : 0;
     const marks = [];
     sg.signals.forEach((r) => {
@@ -266,7 +274,7 @@ async function loadChart() {
     });
     marks.sort((a, b) => a.time - b.time);
     series.setMarkers(marks);
-    chart.timeScale().fitContent();
+    if (reset) chart.timeScale().fitContent();
     $("chartTitle").textContent = curPair + " · M5";
     $("chartMsg").textContent = marks.length ? "" : "এই পেয়ারে এখনো কোনো সিগন্যাল আসেনি";
   } catch (e) { $("chartMsg").textContent = e.message; }
@@ -281,21 +289,76 @@ async function loadMarket() {
       const ch = r.change_pct;
       const live = (st.WIN || st.LOSS) ? `${st.WIN || 0}/${st.LOSS || 0}${st.win_rate != null ? " (" + st.win_rate + "%)" : ""}` : "-";
       return `<tr class="mk ${r.pair === curPair ? "sel" : ""}" data-pair="${esc(r.pair)}">
-        <td><b>${esc(r.pair)}</b></td><td>${r.price == null ? "-" : r.price.toFixed(r.decimals)}</td>
-        <td class="${ch > 0 ? "up" : (ch < 0 ? "dn" : "")}">${ch == null ? "-" : (ch > 0 ? "+" : "") + ch + "%"}</td>
-        <td><span class="badge ${r.open ? "ok" : "NEUTRAL"}">${r.open ? "চালু" : "বন্ধ"}</span></td>
+        <td><b>${esc(r.pair)}</b></td><td class="p">${r.price == null ? "-" : r.price.toFixed(r.decimals)}</td>
+        <td class="c ${ch > 0 ? "up" : (ch < 0 ? "dn" : "")}">${ch == null ? "-" : (ch > 0 ? "+" : "") + ch + "%"}</td>
+        <td><span class="badge ${r.open ? "ok" : "NEUTRAL"} o">${r.open ? "চালু" : "বন্ধ"}</span></td>
         <td>${esc(r.approved)}</td><td>${esc(live)}</td></tr>`;
     }).join("");
-    document.querySelectorAll("#mkTable tr.mk").forEach((tr) => { tr.onclick = () => selectPair(tr.dataset.pair); });
+    marketRows = {};
+    document.querySelectorAll("#mkTable tr.mk").forEach((tr) => {
+      const pair = tr.dataset.pair, mk = data.markets.find((x) => x.pair === pair) || {};
+      marketRows[pair] = { price: tr.querySelector(".p"), change: tr.querySelector(".c"), open: tr.querySelector(".o"), ref: mk.ref_price || null };
+      tr.onclick = () => selectPair(pair);
+    });
   } catch (e) { $("mkNote").textContent = e.message; }
 }
 
 function selectPair(p) {
   curPair = p; $("chartSel").value = p; $("pairSel").value = p;
-  loadChart(); loadSignals(); renderBt(); loadMarket();
+  loadChart(true); loadSignals(); renderBt();
+  document.querySelectorAll("#mkTable tr.mk").forEach((tr) => tr.classList.toggle("sel", tr.dataset.pair === p));
   $("chart").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 $("chartSel").onchange = () => selectPair($("chartSel").value);
+
+// ---------------- live movement (price stream -> last candle + market table)
+function decOf(pair) { return pair.endsWith("JPY") ? 3 : 5; }
+function applyLive(price, ts) {
+  if (!series || !bars.length) return;
+  const step = 300, t = Math.floor(ts / step) * step, last = bars[bars.length - 1];
+  if (t < last.time) return;
+  const range = chart.timeScale().getVisibleLogicalRange();
+  const following = !range || range.to >= bars.length - 2;
+  let next;
+  if (t === last.time) {
+    next = { time: last.time, open: last.open, high: Math.max(last.high, price), low: Math.min(last.low, price), close: price };
+    bars[bars.length - 1] = next;
+  } else {
+    next = { time: t, open: last.close, high: Math.max(last.close, price), low: Math.min(last.close, price), close: price };
+    bars.push(next);
+    if (following) chart.timeScale().scrollToRealTime();
+  }
+  series.update({ ...next, time: next.time + OFF });
+}
+async function pollLive() {
+  try {
+    const d = await api("/api/binary/live");
+    let chartLive = false;
+    Object.entries(d.prices).forEach(([pair, v]) => {
+      const row = marketRows[pair], fresh = v.age < 20;
+      if (row) {
+        const cell = row.price, prev = Number(cell.dataset.p || 0);
+        if (prev && v.price !== prev) { cell.classList.remove("flash-up", "flash-dn"); void cell.offsetWidth; cell.classList.add(v.price > prev ? "flash-up" : "flash-dn"); }
+        cell.dataset.p = v.price;
+        cell.textContent = v.price.toFixed(decOf(pair));
+        if (row.ref) {
+          const ch = (v.price - row.ref) / row.ref * 100;
+          row.change.textContent = (ch > 0 ? "+" : "") + ch.toFixed(3) + "%";
+          row.change.className = "c " + (ch > 0 ? "up" : (ch < 0 ? "dn" : ""));
+        }
+        row.open.className = "badge o " + (fresh ? "ok" : "NEUTRAL");
+        row.open.textContent = fresh ? "লাইভ" : "বন্ধ";
+      }
+      if (pair === curPair) {
+        $("livePrice").textContent = v.price.toFixed(decOf(pair));
+        if (fresh) { applyLive(v.price, v.ts); chartLive = true; }
+      }
+    });
+    const tag = $("liveTag");
+    tag.className = "badge " + (chartLive ? "ok" : "NEUTRAL");
+    tag.textContent = chartLive ? "● লাইভ" : (d.status === "streaming" ? "মার্কেট বন্ধ" : (d.status === "no_key" ? "PYTH_API_KEY নেই" : "সংযোগ হচ্ছে…"));
+  } catch (e) { /* retry next tick */ }
+}
 
 let lastBtStatus = "";
 async function refresh() {
@@ -303,12 +366,18 @@ async function refresh() {
     const s = await loadStatus();
     if (s.backtest.status !== lastBtStatus) { lastBtStatus = s.backtest.status; await loadBt(); }
     await Promise.all([loadStats(), loadSignals()]);
-    loadMarket(); loadChart();
   } catch (e) { $("msg").textContent = e.message; }
 }
 loadBt().catch(() => {});
-refresh();
-setInterval(refresh, 15000);
+(async () => {
+  await refresh();
+  await loadMarket();
+  loadChart(true);
+  setInterval(pollLive, 1000);
+  setInterval(refresh, 15000);
+  setInterval(() => loadChart(false), 30000);
+  setInterval(loadMarket, 60000);
+})();
 </script>
 </body>
 </html>
