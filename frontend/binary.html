@@ -356,7 +356,12 @@ async function pollLive() {
     });
     const tag = $("liveTag");
     tag.className = "badge " + (chartLive ? "ok" : "NEUTRAL");
-    tag.textContent = chartLive ? "● লাইভ" : (d.status === "streaming" ? "মার্কেট বন্ধ" : (d.status === "no_key" ? "PYTH_API_KEY নেই" : "সংযোগ হচ্ছে…"));
+    tag.textContent = chartLive ? "● লাইভ"
+      : ((d.missing || []).includes(curPair) ? "ফিড পাওয়া যায়নি"
+      : (d.status === "no_key" ? "PYTH_API_KEY নেই"
+      : (d.status === "no_feeds" ? "Pyth ফিড আইডি নেই"
+      : (d.status === "streaming" ? "মার্কেট বন্ধ / আপডেট নেই" : "সংযোগ হচ্ছে…"))));
+    tag.title = d.error || "";
   } catch (e) { /* retry next tick */ }
 }
 

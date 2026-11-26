@@ -123,27 +123,36 @@ FEED_RETRY = {}
 
 
 async def resolve_symbols(m):
-    """Pyth symbol + live feed id for each pair (default symbol FX.EUR/USD); verified through /symbols."""
+    """Pyth symbol + live feed id per pair. Same /symbols lookup as the main page (full symbol, state=stable)."""
     for pair in PAIRS:
         if pair in SYMBOLS and (pair in FEEDS or time.time() - FEED_RETRY.get(pair, 0) < 600):
             continue
         FEED_RETRY[pair] = time.time()
         symbol = SYMBOLS.get(pair) or f"FX.{pair}"
-        try:
-            response = await m.pyth_get("/symbols", params={"query": pair, "asset_type": "fx"})
-            if response.status_code == 200:
-                data = response.json()
-                items = [i for i in data if isinstance(i, dict)] if isinstance(data, list) else []
-                names = [str(i.get("symbol")) for i in items]
-                if symbol not in names:
-                    match = [n for n in names if n.endswith(pair)]
-                    if match:
-                        symbol = match[0]
-                item = next((i for i in items if i.get("symbol") == symbol), None)
-                if item and item.get("pyth_lazer_id") is not None:
-                    FEEDS[pair] = {"id": int(item["pyth_lazer_id"]), "channel": item.get("min_channel") or m.PYTH_CHANNEL}
-        except Exception:
-            logger.warning("Could not verify Pyth symbol for %s, using %s", pair, symbol)
+        found = None
+        for query in (f"FX.{pair}", pair):
+            try:
+                response = await m.pyth_get("/symbols", params={"query": query}, timeout=20)
+                data = response.json() if response.status_code == 200 else []
+            except Exception:
+                logger.warning("Pyth symbol lookup failed for %s", pair)
+                continue
+            items = [i for i in data if isinstance(i, dict)] if isinstance(data, list) else []
+            exact = [i for i in items if i.get("symbol") == f"FX.{pair}"]
+            loose = [i for i in items if str(i.get("symbol", "")).endswith(pair)]
+            for group in (exact, loose):
+                stable = [i for i in group if i.get("state") == "stable"]
+                if stable or group:
+                    found = (stable or group)[0]
+                    break
+            if found:
+                break
+        if found:
+            symbol = str(found.get("symbol") or symbol)
+            if found.get("pyth_lazer_id") is not None:
+                FEEDS[pair] = {"id": int(found["pyth_lazer_id"]), "channel": found.get("min_channel") or m.PYTH_CHANNEL}
+        else:
+            logger.warning("No Pyth symbol found for %s, keeping %s", pair, symbol)
         SYMBOLS[pair] = symbol
     return SYMBOLS
 
@@ -594,6 +603,7 @@ async def market_overview():
 # ---------------------------------------------------------------- live price stream (all 18 pairs, one websocket)
 LIVE = {}   # pair -> {"price", "ts", "recv"}
 LIVE_STATE = {"status": "idle", "error": None, "since": None}
+LIVE_IDLE_S = 60  # reconnect (next Pyth endpoint) when the stream is silent this long
 
 
 async def live_loop():
@@ -630,7 +640,11 @@ async def live_loop():
                         "channel": channel, "ignoreInvalidFeeds": True, "deliveryFormat": "json", "parsed": True,
                     }))
                 LIVE_STATE.update(status="connected", error=None, since=time.time())
-                async for raw in ws:
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=LIVE_IDLE_S)
+                    except asyncio.TimeoutError:
+                        raise ConnectionError(f"no data for {LIVE_IDLE_S}s")
                     try:
                         message = json.loads(raw)
                     except (ValueError, TypeError):
@@ -767,5 +781,6 @@ async def binary_live():
     now = time.time()
     return {
         "status": LIVE_STATE["status"], "error": LIVE_STATE["error"], "now": int(now),
+        "feeds": len(FEEDS), "missing": [p for p in PAIRS if p not in FEEDS],
         "prices": {pair: {"price": v["price"], "ts": v["ts"], "age": round(now - v["recv"], 1)} for pair, v in LIVE.items()},
     }
