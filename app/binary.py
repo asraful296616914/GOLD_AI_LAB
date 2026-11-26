@@ -118,43 +118,104 @@ def decimals(pair):
 
 
 # ---------------------------------------------------------------- data
-FEEDS = {}        # pair -> {"id": pyth_lazer_id, "channel": min_channel}
-FEED_RETRY = {}
+FEEDS = {}        # pair -> {"id": pyth_lazer_id, "channel": min_channel}  (only stable feeds)
+CATALOG = {"at": 0.0, "try": 0.0, "data": {}}   # pair -> {"state", "channel", "id", "symbol"} from Pyth's public list
+NOTES = {"coming_soon": "Pyth-এ এই ফিড এখনো চালু হয়নি (coming soon)"}
+
+
+async def load_catalog(m):
+    """One public /symbols call for all FX pairs (no per-pair calls, so no rate-limit trouble)."""
+    if CATALOG["data"] and time.time() - CATALOG["at"] < 3600:
+        return CATALOG["data"]
+    if time.time() - CATALOG["try"] < 20:
+        return CATALOG["data"]
+    CATALOG["try"] = time.time()
+    try:
+        response = await m.pyth_get("/symbols", params={"asset_type": "fx"}, timeout=30)
+        data = response.json() if response.status_code == 200 else []
+    except Exception:
+        logger.warning("Could not load Pyth FX symbol list")
+        return CATALOG["data"]
+    by_symbol = {i.get("symbol"): i for i in data if isinstance(i, dict)}
+    out = {}
+    for pair in PAIRS:
+        item = by_symbol.get(f"FX.{pair}")
+        if item:
+            out[pair] = {
+                "state": item.get("state"), "channel": item.get("min_channel") or m.PYTH_CHANNEL,
+                "id": item.get("pyth_lazer_id"), "symbol": item["symbol"],
+            }
+    if out:
+        CATALOG.update(at=time.time(), data=out)
+    return CATALOG["data"]
+
+
+def feed_state(pair):
+    """'stable' / 'coming_soon' / ... from Pyth's list, or None when the list is not loaded yet."""
+    info = CATALOG["data"].get(pair)
+    if info:
+        return info["state"]
+    return "unlisted" if CATALOG["data"] else None
+
+
+def feed_ok(pair):
+    return feed_state(pair) in (None, "stable")   # unknown -> still try
 
 
 async def resolve_symbols(m):
-    """Pyth symbol + live feed id per pair. Same /symbols lookup as the main page (full symbol, state=stable)."""
+    """Pyth symbol + live feed id per pair, taken from the public list. Only 'stable' feeds get a live stream."""
+    catalog = await load_catalog(m)
     for pair in PAIRS:
-        if pair in SYMBOLS and (pair in FEEDS or time.time() - FEED_RETRY.get(pair, 0) < 600):
-            continue
-        FEED_RETRY[pair] = time.time()
-        symbol = SYMBOLS.get(pair) or f"FX.{pair}"
-        found = None
-        for query in (f"FX.{pair}", pair):
-            try:
-                response = await m.pyth_get("/symbols", params={"query": query}, timeout=20)
-                data = response.json() if response.status_code == 200 else []
-            except Exception:
-                logger.warning("Pyth symbol lookup failed for %s", pair)
-                continue
-            items = [i for i in data if isinstance(i, dict)] if isinstance(data, list) else []
-            exact = [i for i in items if i.get("symbol") == f"FX.{pair}"]
-            loose = [i for i in items if str(i.get("symbol", "")).endswith(pair)]
-            for group in (exact, loose):
-                stable = [i for i in group if i.get("state") == "stable"]
-                if stable or group:
-                    found = (stable or group)[0]
-                    break
-            if found:
-                break
-        if found:
-            symbol = str(found.get("symbol") or symbol)
-            if found.get("pyth_lazer_id") is not None:
-                FEEDS[pair] = {"id": int(found["pyth_lazer_id"]), "channel": found.get("min_channel") or m.PYTH_CHANNEL}
+        info = catalog.get(pair)
+        SYMBOLS[pair] = info["symbol"] if info else f"FX.{pair}"
+        if info and info["state"] == "stable" and info["id"] is not None:
+            FEEDS[pair] = {"id": int(info["id"]), "channel": info["channel"]}
         else:
-            logger.warning("No Pyth symbol found for %s, keeping %s", pair, symbol)
-        SYMBOLS[pair] = symbol
+            FEEDS.pop(pair, None)
     return SYMBOLS
+
+
+def _reason(error):
+    status = getattr(error, "status_code", None)
+    if status == 403:
+        return "Pyth 403: আপনার API কী-তে এই ফিডের অ্যাক্সেস নেই"
+    if status == 429:
+        return "Pyth 429: রেট লিমিট"
+    if status == 401:
+        return "Pyth 401: API কী ঠিক নেই"
+    detail = getattr(error, "detail", None)
+    if isinstance(detail, dict):
+        detail = detail.get("message")
+    return (f"Pyth {status}: " if status else "") + str(detail or type(error).__name__)[:90]
+
+
+async def probe(m, symbol, resolution, start, end):
+    """Like backtest.fetch_range, but also says WHY there is no data. Returns (candles, reason)."""
+    endpoint = f"/{m.PYTH_CHANNEL}/history"
+    try:
+        response = await m.pyth_get(
+            endpoint, params={"symbol": symbol, "from": start, "to": end, "resolution": resolution},
+            headers=m.get_pyth_headers(), timeout=30,
+        )
+    except Exception as error:
+        return [], _reason(error)
+    if response.status_code != 200:
+        return [], _reason(type("E", (), {"status_code": response.status_code, "detail": response.text[:90]})())
+    try:
+        data = response.json()
+    except ValueError:
+        return [], "Pyth থেকে ভুল JSON এসেছে"
+    if not isinstance(data, dict) or data.get("s") not in ("ok", "no_data"):
+        note = data.get("errmsg") if isinstance(data, dict) else None
+        return [], "Pyth: " + str(note or (data.get("s") if isinstance(data, dict) else "ভুল রেসপন্স"))[:90]
+    t, o, h, l, c = (data.get(key) or [] for key in ("t", "o", "h", "l", "c"))
+    if len({len(t), len(o), len(h), len(l), len(c)}) != 1:
+        return [], "Pyth থেকে অসম্পূর্ণ ক্যান্ডেল এসেছে"
+    candles = [
+        {"time": int(t[i]), "open": float(o[i]), "high": float(h[i]), "low": float(l[i]), "close": float(c[i])}
+        for i in range(len(t))
+    ]
+    return candles, ("ok" if candles else "no_data")
 
 
 def gather(m, sg, window, htf_window, atr):
@@ -274,6 +335,10 @@ async def run_job(days=BT_DAYS):
         rows, per_pair = [], []
         for index, pair in enumerate(PAIRS):
             STATE["pair"] = pair
+            if not feed_ok(pair):
+                per_pair.append({"pair": pair, "error": NOTES["coming_soon"]})
+                STATE["progress"] = round((index + 1) / len(PAIRS) * 100)
+                continue
             try:
                 base = await backtest.load_history(m, symbols[pair], BASE_TF, days)
                 try:
@@ -281,7 +346,8 @@ async def run_job(days=BT_DAYS):
                 except Exception:
                     htf = []
                 if len(base) < 200:
-                    per_pair.append({"pair": pair, "error": "যথেষ্ট ক্যান্ডেল পাওয়া যায়নি", "bars": len(base)})
+                    _, why = await probe(m, symbols[pair], BASE_TF, int(time.time()) - 3 * 86400, int(time.time()))
+                    per_pair.append({"pair": pair, "error": f"ক্যান্ডেল কম ({len(base)}টি)" + ("" if why in ("ok", "no_data") else " · " + why), "bars": len(base)})
                     continue
                 results = await asyncio.to_thread(simulate_pair, m, sg, base, htf)
                 pair_rows = summarize(pair, results)
@@ -289,7 +355,7 @@ async def run_job(days=BT_DAYS):
                 per_pair.append({"pair": pair, "bars": len(base), "approved": sum(1 for r in pair_rows if r["approved"])})
             except Exception as error:
                 logger.exception("Binary backtest failed for %s", pair)
-                per_pair.append({"pair": pair, "error": type(error).__name__})
+                per_pair.append({"pair": pair, "error": _reason(error)})
             STATE["progress"] = round((index + 1) / len(PAIRS) * 100)
         result = {
             "days": days, "timeframe": "M5", "min_win": MIN_WIN, "min_trades": MIN_TRADES,
@@ -552,16 +618,22 @@ async def chart_candles(pair, bars=300):
     if cached and time.time() - cached[0] < 20:
         return cached[1]
     m = _m()
-    symbols = await resolve_symbols(m)
+    await resolve_symbols(m)
+    if not feed_ok(pair):
+        raise HTTPException(status_code=404, detail=NOTES["coming_soon"])
+    symbol = SYMBOLS[pair]
     end = int(time.time())
-    merged = {}
+    merged, reason = {}, "no_data"
     for _ in range(4):  # step back over weekend gaps until there are enough candles
         start = end - bars * BAR_SEC
-        for c in await backtest.fetch_range(m, symbols[pair], BASE_TF, start, end):
+        candles, reason = await probe(m, symbol, BASE_TF, start, end)
+        for c in candles:
             merged[c["time"]] = c
-        if len(merged) >= min(bars, 120):
+        if len(merged) >= min(bars, 120) or reason not in ("ok", "no_data"):
             break
         end = start - 1
+    if not merged:
+        raise HTTPException(status_code=404, detail="ডেটা নেই — " + ("মার্কেট বন্ধ বা ডেটা আসেনি" if reason in ("ok", "no_data") else reason))
     candles = [merged[t] for t in sorted(merged)][-bars:]
     CANDLE_CACHE[pair] = (time.time(), candles)
     return candles
@@ -572,25 +644,29 @@ async def market_overview():
         return MARKET_CACHE["data"]
     m = _m()
     symbols = await resolve_symbols(m)
-    gate = asyncio.Semaphore(5)
+    gate = asyncio.Semaphore(3)
     now = int(time.time())
 
     async def one(pair):
+        if not feed_ok(pair):
+            return {"pair": pair, "price": None, "reason": "coming_soon", "note": NOTES["coming_soon"]}
         async with gate:
-            try:
-                candles = await backtest.fetch_range(m, symbols[pair], BASE_TF, now - 40 * BAR_SEC, now)
-                if not candles:
-                    return {"pair": pair, "price": None}
-                candles.sort(key=lambda c: c["time"])
-                last = candles[-1]
-                ref = candles[-13] if len(candles) >= 13 else candles[0]
-                return {
-                    "pair": pair, "price": last["close"], "time": last["time"], "ref_price": ref["close"],
-                    "change_pct": round((last["close"] - ref["close"]) / ref["close"] * 100, 3) if ref["close"] else None,
-                    "open": now - (last["time"] + BAR_SEC) < 900,
-                }
-            except Exception:
-                return {"pair": pair, "price": None}
+            candles, reason = await probe(m, symbols[pair], BASE_TF, now - 40 * BAR_SEC, now)
+            if "429" in reason:           # one polite retry
+                await asyncio.sleep(1.5)
+                candles, reason = await probe(m, symbols[pair], BASE_TF, now - 40 * BAR_SEC, now)
+            if not candles:
+                weekend = reason in ("ok", "no_data")
+                return {"pair": pair, "price": None, "reason": "no_data" if weekend else "error",
+                        "note": "এই মুহূর্তে ক্যান্ডেল নেই (মার্কেট বন্ধ?)" if weekend else reason}
+            candles.sort(key=lambda c: c["time"])
+            last = candles[-1]
+            ref = candles[-13] if len(candles) >= 13 else candles[0]
+            return {
+                "pair": pair, "price": last["close"], "time": last["time"], "ref_price": ref["close"],
+                "change_pct": round((last["close"] - ref["close"]) / ref["close"] * 100, 3) if ref["close"] else None,
+                "open": now - (last["time"] + BAR_SEC) < 900,
+            }
 
     rows = await asyncio.gather(*(one(p) for p in PAIRS))
     for row in rows:
@@ -694,6 +770,10 @@ def binary_page():
 @router.get("/api/binary/status")
 async def binary_status():
     now = int(time.time())
+    try:
+        await load_catalog(_m())
+    except Exception:
+        pass
     data = LAST_RESULT["data"]
     return {
         "pairs": PAIRS, "expiries_min": [k * 5 for k in EXPIRIES], "min_win": MIN_WIN, "min_trades": MIN_TRADES,
@@ -703,6 +783,7 @@ async def binary_status():
         "backtest_age_s": (now - data["created_at"]) if data else None,
         "approved_count": len(APPROVED), "approved_pairs": sorted({k[0] for k in APPROVED}),
         "scan": dict(SCAN), "live": {"status": LIVE_STATE["status"], "error": LIVE_STATE["error"]},
+        "unsupported": [p for p in PAIRS if not feed_ok(p)],
     }
 
 
@@ -761,6 +842,8 @@ async def binary_candles(pair: str = Query("EUR/USD"), bars: int = Query(300, ge
         raise HTTPException(status_code=400, detail="অজানা পেয়ার")
     try:
         candles = await chart_candles(pair, bars)
+    except HTTPException:
+        raise
     except Exception as error:
         logger.warning("Binary candles failed for %s (%s)", pair, type(error).__name__)
         raise HTTPException(status_code=502, detail="চার্টের ডেটা আনা যায়নি")

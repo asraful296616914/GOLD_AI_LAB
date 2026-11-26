@@ -91,6 +91,7 @@ th{color:var(--muted);font-weight:600}
   </div>
   <div class="bar"><i id="btBar"></i></div>
   <div class="muted" id="msg" style="margin-top:8px"></div>
+  <div class="muted" id="btFail" style="margin-top:6px;white-space:normal"></div>
 </div>
 
 <div class="card">
@@ -152,7 +153,7 @@ async function loadStatus() {
   const s = await api("/api/binary/status");
   PAIRS = s.pairs;
   if ($("chartSel").options.length === 0) {
-    PAIRS.forEach((p) => $("chartSel").insertAdjacentHTML("beforeend", `<option>${esc(p)}</option>`));
+    PAIRS.forEach((p) => $("chartSel").insertAdjacentHTML("beforeend", `<option value="${esc(p)}">${esc(p)}${(s.unsupported || []).includes(p) ? " (ফিড নেই)" : ""}</option>`));
     $("chartSel").value = curPair;
   }
   if ($("pairSel").options.length === 1) {
@@ -207,7 +208,11 @@ function renderBt() {
   $("btTable").innerHTML = `<tr><th></th><th>পেয়ার</th><th>কৌশল</th><th>এক্সপায়ারি</th><th>ট্রেড</th><th>জয়</th><th>শেষ ৩০% অংশে</th></tr>`
     + (html || `<tr><td colspan="7" class="muted">${$("onlyOk").checked ? "কোনো কৌশল এখনো ৬০%-এর উপরে নেই" : "ডেটা নেই"}</td></tr>`);
 }
-async function loadBt() { BT = (await api("/api/binary/backtest")).result; renderBt(); }
+async function loadBt() {
+  BT = (await api("/api/binary/backtest")).result; renderBt();
+  const bad = ((BT && BT.pairs) || []).filter((p) => p.error);
+  $("btFail").innerHTML = bad.length ? "ব্যাকটেস্ট হয়নি: " + bad.map((p) => `<b>${esc(p.pair)}</b> (${esc(p.error)})`).join(" · ") : "";
+}
 
 $("pairSel").onchange = () => { if ($("pairSel").value) selectPair($("pairSel").value); else { loadSignals(); renderBt(); } };
 $("onlyOk").onchange = renderBt;
@@ -277,22 +282,27 @@ async function loadChart(reset) {
     if (reset) chart.timeScale().fitContent();
     $("chartTitle").textContent = curPair + " · M5";
     $("chartMsg").textContent = marks.length ? "" : "এই পেয়ারে এখনো কোনো সিগন্যাল আসেনি";
-  } catch (e) { $("chartMsg").textContent = e.message; }
+  } catch (e) {
+    if (reset !== false && series) { bars = []; series.setData([]); series.setMarkers([]); }
+    $("chartMsg").textContent = curPair + ": " + e.message;
+    $("livePrice").textContent = "";
+  }
 }
 
 async function loadMarket() {
   try {
     const data = await api("/api/binary/market");
-    $("mkNote").textContent = data.session_open ? "ট্রেডিং সেশন চালু" : "ট্রেডিং সেশন বন্ধ (এশিয়া/ক্লোজড)";
-    $("mkTable").innerHTML = `<tr><th>পেয়ার</th><th>দাম</th><th>১ ঘণ্টায়</th><th>মার্কেট</th><th>যোগ্য কৌশল</th><th>লাইভ জয়/হার</th></tr>` + data.markets.map((r) => {
+    const noFeed = data.markets.filter((r) => r.reason === "coming_soon").length, errs = data.markets.filter((r) => r.reason === "error").length;
+    $("mkNote").textContent = (data.session_open ? "ট্রেডিং সেশন চালু" : "ট্রেডিং সেশন বন্ধ (এশিয়া/ক্লোজড)") + ` · Pyth-এ ফিড নেই: ${noFeed}টি` + (errs ? ` · ত্রুটি: ${errs}টি` : "");
+    $("mkTable").innerHTML = `<tr><th>পেয়ার</th><th>দাম</th><th>১ ঘণ্টায়</th><th>মার্কেট</th><th>যোগ্য কৌশল</th><th>লাইভ জয়/হার</th><th>নোট</th></tr>` + data.markets.map((r) => {
       const st = lastStats[r.pair] || {};
       const ch = r.change_pct;
       const live = (st.WIN || st.LOSS) ? `${st.WIN || 0}/${st.LOSS || 0}${st.win_rate != null ? " (" + st.win_rate + "%)" : ""}` : "-";
       return `<tr class="mk ${r.pair === curPair ? "sel" : ""}" data-pair="${esc(r.pair)}">
         <td><b>${esc(r.pair)}</b></td><td class="p">${r.price == null ? "-" : r.price.toFixed(r.decimals)}</td>
         <td class="c ${ch > 0 ? "up" : (ch < 0 ? "dn" : "")}">${ch == null ? "-" : (ch > 0 ? "+" : "") + ch + "%"}</td>
-        <td><span class="badge ${r.open ? "ok" : "NEUTRAL"} o">${r.open ? "চালু" : "বন্ধ"}</span></td>
-        <td>${esc(r.approved)}</td><td>${esc(live)}</td></tr>`;
+        <td><span class="badge ${r.reason === "error" ? "LOSS" : (r.open ? "ok" : "NEUTRAL")} o" title="${esc(r.note || "")}">${r.reason === "coming_soon" ? "ফিড নেই" : (r.reason === "error" ? "ত্রুটি" : (r.open ? "চালু" : "বন্ধ"))}</span></td>
+        <td>${esc(r.approved)}</td><td>${esc(live)}</td><td class="muted" style="white-space:normal;min-width:160px">${esc(r.note || "")}</td></tr>`;
     }).join("");
     marketRows = {};
     document.querySelectorAll("#mkTable tr.mk").forEach((tr) => {
