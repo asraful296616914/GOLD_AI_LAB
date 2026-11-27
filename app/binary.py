@@ -622,30 +622,71 @@ CANDLE_CACHE = {}
 MARKET_CACHE = {"at": 0.0, "data": None}
 
 
-async def chart_candles(pair, bars=300):
-    cached = CANDLE_CACHE.get(pair)
-    if cached and time.time() - cached[0] < 20:
-        return cached[1]
+MAX_BARS = int(os.getenv("BINARY_MAX_BARS", "5000"))   # ~17 days of M5 candles
+CHUNK_BARS = 450      # candles per Pyth request
+PARALLEL = 4          # requests in flight at once
+TAIL_TTL = 5          # seconds: the newest candles are refreshed at most this often
+HISTORY = {}          # pair -> {"c": {time: candle}, "tail_at": ts, "reason": str, "ext_bars": int, "ext_at": ts}
+HIST_LOCKS = {}
+
+
+async def chart_candles(pair, bars=300, since=None):
+    """Fast, deep candle history. Newest candles come from one small request; older history is fetched in parallel
+    chunks once, kept in memory and only extended afterwards."""
+    bars = max(1, min(int(bars), MAX_BARS))
     m = _m()
     await resolve_symbols(m)
     if not feed_ok(pair):
         raise HTTPException(status_code=404, detail=NOTES["coming_soon"])
     symbol = SYMBOLS[pair]
-    end = int(time.time())
-    merged, reason = {}, "no_data"
-    for _ in range(4):  # step back over weekend gaps until there are enough candles
-        start = end - bars * BAR_SEC
-        candles, reason = await probe(m, symbol, BASE_TF, start, end)
-        for c in candles:
-            merged[c["time"]] = c
-        if len(merged) >= min(bars, 120) or reason not in ("ok", "no_data"):
-            break
-        end = start - 1
-    if not merged:
-        raise HTTPException(status_code=404, detail="ডেটা নেই — " + ("মার্কেট বন্ধ বা ডেটা আসেনি" if reason in ("ok", "no_data") else reason))
-    candles = [merged[t] for t in sorted(merged)][-bars:]
-    CANDLE_CACHE[pair] = (time.time(), candles)
-    return candles
+    async with HIST_LOCKS.setdefault(pair, asyncio.Lock()):
+        h = HISTORY.setdefault(pair, {"c": {}, "tail_at": 0.0, "reason": "no_data", "ext_bars": 0, "ext_at": 0.0})
+        now = int(time.time())
+        # 1) newest candles: one cheap request
+        if not h["c"] or time.time() - h["tail_at"] >= TAIL_TTL:
+            last = max(h["c"]) if h["c"] else None
+            start = last - 2 * BAR_SEC if last else now - CHUNK_BARS * BAR_SEC
+            candles, reason = await probe(m, symbol, BASE_TF, start, now)
+            for c in candles:
+                h["c"][c["time"]] = c
+            h["reason"], h["tail_at"] = reason, time.time()
+        # 2) older history: parallel waves of chunks, only while we hold fewer candles than asked for
+        retry_ok = not (h["ext_bars"] >= bars and time.time() - h["ext_at"] < 600)
+        if len(h["c"]) < bars and retry_ok and since is None:
+            gate = asyncio.Semaphore(PARALLEL)
+            oldest = min(h["c"]) if h["c"] else now
+            span = CHUNK_BARS * BAR_SEC
+
+            async def one(end):
+                async with gate:
+                    return await probe(m, symbol, BASE_TF, end - span, end)
+
+            for _wave in range(8):
+                if len(h["c"]) >= bars:
+                    break
+                ends = [oldest - 1 - i * span for i in range(PARALLEL)]
+                results = await asyncio.gather(*(one(e) for e in ends))
+                failed = False
+                for candles, reason in results:
+                    if reason not in ("ok", "no_data"):
+                        failed, h["reason"] = True, reason
+                    for c in candles:
+                        h["c"][c["time"]] = c
+                oldest -= PARALLEL * span
+                if failed:
+                    break
+            h["ext_bars"], h["ext_at"] = bars, time.time()
+        if len(h["c"]) > MAX_BARS + 500:
+            for t in sorted(h["c"])[: len(h["c"]) - MAX_BARS]:
+                h["c"].pop(t, None)
+        if not h["c"]:
+            reason = h["reason"]
+            raise HTTPException(status_code=404, detail="ডেটা নেই — " + ("মার্কেট বন্ধ বা ডেটা আসেনি" if reason in ("ok", "no_data") else reason))
+        ordered = [h["c"][t] for t in sorted(h["c"])]
+    if since is not None:
+        return [c for c in ordered if c["time"] >= since]
+    CANDLE_CACHE[pair] = (time.time(), ordered[-bars:])
+    return ordered[-bars:]
 
 
 async def market_overview():
@@ -852,17 +893,18 @@ async def binary_stats():
 
 
 @router.get("/api/binary/candles")
-async def binary_candles(pair: str = Query("EUR/USD"), bars: int = Query(300, ge=60, le=450)):
+async def binary_candles(pair: str = Query("EUR/USD"), bars: int = Query(300, ge=60, le=MAX_BARS),
+                         since: int | None = Query(None, ge=0)):
     if pair not in PAIRS:
         raise HTTPException(status_code=400, detail="অজানা পেয়ার")
     try:
-        candles = await chart_candles(pair, bars)
+        candles = await chart_candles(pair, bars, since)
     except HTTPException:
         raise
     except Exception as error:
         logger.warning("Binary candles failed for %s (%s)", pair, type(error).__name__)
         raise HTTPException(status_code=502, detail="চার্টের ডেটা আনা যায়নি")
-    return {"pair": pair, "decimals": decimals(pair), "candles": candles}
+    return {"pair": pair, "decimals": decimals(pair), "candles": candles, "count": len(candles), "max_bars": MAX_BARS}
 
 
 @router.get("/api/binary/market")

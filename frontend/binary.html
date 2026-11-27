@@ -244,49 +244,81 @@ function initChart() {
 const OUT_COLOR = { WIN: "#22c55e", LOSS: "#ef4444", OPEN: "#f5b942", DRAW: "#64748b", VOID: "#64748b" };
 const OUT_TEXT = { WIN: "জয়", LOSS: "হার", OPEN: "চলমান", DRAW: "ড্র", VOID: "বাতিল" };
 
-let chartReq = 0;
+let chartReq = 0, histReq = 0, lastSigs = [], barsPair = null;
+const FIRST_BARS = 300, MAX_BARS_REQ = 5000;
+const toBar = (c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close });
+function paintBars() { series.setData(bars.map((c) => ({ ...c, time: c.time + OFF }))); }
+function drawMarks() {
+  const first = bars.length ? bars[0].time : 0, marks = [];
+  lastSigs.forEach((r) => {
+    if (r.candle_time < first) return;
+    const up = r.direction === "BUY";
+    const col = OUT_COLOR[r.outcome] || "#f5b942";
+    marks.push({
+      time: r.candle_time + OFF, position: up ? "belowBar" : "aboveBar", shape: up ? "arrowUp" : "arrowDown", color: col,
+      text: (up ? "CALL " : "PUT ") + (OUT_TEXT[r.outcome] || r.outcome) + " · " + r.expiry_min + "m",
+    });
+    if (r.outcome === "WIN" || r.outcome === "LOSS" || r.outcome === "DRAW") {
+      marks.push({
+        time: r.expire_time - 300 + OFF, position: up ? "aboveBar" : "belowBar", shape: "circle", color: col,
+        text: r.outcome === "WIN" ? "✔" : (r.outcome === "LOSS" ? "✖" : "="),
+      });
+    }
+  });
+  marks.sort((a, b) => a.time - b.time);
+  series.setMarkers(marks);
+  $("chartMsg").textContent = marks.length ? "" : "এই পেয়ারে এখনো কোনো সিগন্যাল আসেনি";
+}
+// Loads the newest 300 candles first (fast); later refreshes only fetch the candles that are new (tiny, gzip-compressed).
 async function loadChart(reset) {
   initChart();
   if (!series) { $("chartMsg").textContent = "চার্ট লাইব্রেরি লোড হয়নি (ইন্টারনেট চেক করুন)"; return; }
   const my = ++chartReq;
+  const pair = curPair, enc = encodeURIComponent(pair);
   try {
-    const [cd, sg] = await Promise.all([
-      api("/api/binary/candles?pair=" + encodeURIComponent(curPair)),
-      api("/api/binary/signals?limit=200&pair=" + encodeURIComponent(curPair)),
-    ]);
+    const incremental = !reset && bars.length > 0 && barsPair === pair;
+    const url = incremental
+      ? "/api/binary/candles?pair=" + enc + "&bars=60&since=" + (bars[bars.length - 1].time - 600)
+      : "/api/binary/candles?pair=" + enc + "&bars=" + FIRST_BARS;
+    const [cd, sg] = await Promise.all([api(url), api("/api/binary/signals?limit=200&pair=" + enc)]);
     if (my !== chartReq) return;
-    const d = cd.decimals;
-    decimals = d;
-    series.applyOptions({ priceFormat: { type: "price", precision: d, minMove: 1 / Math.pow(10, d) } });
-    bars = cd.candles.map((c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }));
-    series.setData(bars.map((c) => ({ ...c, time: c.time + OFF })));
-    const first = cd.candles.length ? cd.candles[0].time : 0;
-    const marks = [];
-    sg.signals.forEach((r) => {
-      if (r.candle_time < first) return;
-      const up = r.direction === "BUY";
-      const col = OUT_COLOR[r.outcome] || "#f5b942";
-      marks.push({
-        time: r.candle_time + OFF, position: up ? "belowBar" : "aboveBar", shape: up ? "arrowUp" : "arrowDown", color: col,
-        text: (up ? "CALL " : "PUT ") + (OUT_TEXT[r.outcome] || r.outcome) + " · " + r.expiry_min + "m",
-      });
-      if (r.outcome === "WIN" || r.outcome === "LOSS" || r.outcome === "DRAW") {
-        marks.push({
-          time: r.expire_time - 300 + OFF, position: up ? "aboveBar" : "belowBar", shape: "circle", color: col,
-          text: r.outcome === "WIN" ? "✔" : (r.outcome === "LOSS" ? "✖" : "="),
-        });
-      }
-    });
-    marks.sort((a, b) => a.time - b.time);
-    series.setMarkers(marks);
-    if (reset) chart.timeScale().fitContent();
-    $("chartTitle").textContent = curPair + " · M5";
-    $("chartMsg").textContent = marks.length ? "" : "এই পেয়ারে এখনো কোনো সিগন্যাল আসেনি";
+    decimals = cd.decimals;
+    series.applyOptions({ priceFormat: { type: "price", precision: decimals, minMove: 1 / Math.pow(10, decimals) } });
+    if (incremental) {
+      const map = new Map(bars.map((c) => [c.time, c]));
+      cd.candles.forEach((c) => map.set(c.time, toBar(c)));
+      bars = [...map.values()].sort((x, y) => x.time - y.time);
+    } else {
+      bars = cd.candles.map(toBar);
+    }
+    barsPair = pair;
+    paintBars();
+    lastSigs = sg.signals;
+    drawMarks();
+    if (reset) { chart.timeScale().fitContent(); extendHistory(pair); }
+    $("chartTitle").textContent = pair + " · M5 · " + bars.length + " ক্যান্ডেল";
   } catch (e) {
-    if (reset !== false && series) { bars = []; series.setData([]); series.setMarkers([]); }
+    if (reset !== false && series) { bars = []; barsPair = null; series.setData([]); series.setMarkers([]); }
     $("chartMsg").textContent = curPair + ": " + e.message;
     $("livePrice").textContent = "";
   }
+}
+// Background: pulls the deepest history the server can give (up to ~17 days) without moving the chart the user is looking at.
+async function extendHistory(pair) {
+  const my = ++histReq;
+  try {
+    const cd = await api("/api/binary/candles?pair=" + encodeURIComponent(pair) + "&bars=" + MAX_BARS_REQ);
+    if (my !== histReq || pair !== curPair || barsPair !== pair) return;
+    const list = cd.candles.map(toBar);
+    if (list.length <= bars.length || !bars.length) return;
+    const range = chart.timeScale().getVisibleLogicalRange();
+    const shift = Math.max(0, list.findIndex((c) => c.time === bars[0].time));
+    bars = list;
+    paintBars();
+    if (range && shift) chart.timeScale().setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift });
+    drawMarks();
+    $("chartTitle").textContent = pair + " · M5 · " + bars.length + " ক্যান্ডেল";
+  } catch (e) { /* the first 300 candles are already on screen */ }
 }
 
 async function loadMarket() {

@@ -9,6 +9,7 @@ from collections import deque
 import httpx
 import websockets
 
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi import (
     FastAPI, HTTPException, Query,
     WebSocket, WebSocketDisconnect
@@ -45,6 +46,7 @@ app = FastAPI(
     description="Read-only live market chart platform",
     version="2.1.0"
 )
+app.add_middleware(GZipMiddleware, minimum_size=800)  # smaller JSON = faster loads
 
 app.mount(
     "/static",
