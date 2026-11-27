@@ -217,7 +217,7 @@ async function loadBt() {
 $("pairSel").onchange = () => { if ($("pairSel").value) selectPair($("pairSel").value); else { loadSignals(); renderBt(); } };
 $("onlyOk").onchange = renderBt;
 $("runBt").onclick = async () => {
-  try { $("msg").textContent = ""; await post("/api/binary/backtest/run"); $("msg").textContent = "ব্যাকটেস্ট শুরু হয়েছে (১৮টি পেয়ারে কয়েক মিনিট লাগতে পারে)"; refresh(); }
+  try { $("msg").textContent = ""; await post("/api/binary/backtest/run"); $("msg").textContent = "ব্যাকটেস্ট শুরু হয়েছে (২টি পেয়ারে কয়েক মিনিট লাগতে পারে)"; refresh(); }
   catch (e) { $("msg").textContent = e.message; }
 };
 $("runScan").onclick = async () => {
