@@ -72,7 +72,7 @@ th{color:var(--muted);font-weight:600}
 <div class="card">
   <div class="row" style="justify-content:space-between;margin-bottom:10px">
     <div class="row"><h2 style="margin:0" id="chartTitle">চার্ট · M5</h2><span class="badge NEUTRAL" id="liveTag">সংযোগ হচ্ছে…</span><b id="livePrice" style="color:var(--gold)"></b></div>
-    <select id="chartSel"></select>
+    <select id="tfSel"><option value="5">M5 · ৫ মিনিট</option><option value="10">M10 · ১০ মিনিট</option><option value="15">M15 · ১৫ মিনিট</option></select> <select id="chartSel"></select>
   </div>
   <div id="chart"></div>
   <div class="legend">
@@ -80,6 +80,23 @@ th{color:var(--muted);font-weight:600}
     <span style="color:var(--gold)">● চলমান</span><span style="color:var(--gray)">● ড্র</span><span>সময়: বাংলাদেশ (UTC+6)</span>
   </div>
   <div class="muted" id="chartMsg" style="margin-top:6px"></div>
+</div>
+
+<div class="card"><h2>টেলিগ্রাম (বাইনারির নিজস্ব বট)</h2>
+  <div class="muted" id="btg-status" style="margin-bottom:8px">লোড হচ্ছে...</div>
+  <div style="display:grid;gap:8px;max-width:520px">
+    <input id="btg-token" type="password" autocomplete="off" placeholder="বাইনারির বট টোকেন (BotFather থেকে)" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:10px">
+    <input id="btg-chat" type="text" autocomplete="off" placeholder="চ্যাট আইডি (যেমন 123456789 বা @চ্যানেল)" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:10px">
+    <input id="btg-admin" type="password" autocomplete="off" placeholder="অ্যাডমিন কী" style="background:#0f1626;color:#e6ebf5;border:1px solid #1c2740;border-radius:8px;padding:10px;display:none">
+    <label class="muted"><input id="btg-enabled" type="checkbox" checked> নোটিফিকেশন চালু</label>
+    <label class="muted"><input id="btg-new" type="checkbox" checked> নতুন সিগন্যাল পাঠাও (৫ / ১০ / ১৫ মিনিট)</label>
+    <label class="muted"><input id="btg-result" type="checkbox" checked> ফলাফল পাঠাও (জয় / হার / ড্র)</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button id="btg-save">সংরক্ষণ</button><button id="btg-test">টেস্ট মেসেজ</button><button id="btg-clear" style="background:#ef4444;color:#fff">সংযোগ মুছুন</button>
+    </div>
+    <div class="muted" id="btg-msg"></div>
+  </div>
+  <div class="muted" style="margin-top:8px">এটা গোল্ডের টেলিগ্রাম থেকে সম্পূর্ণ আলাদা। বাইনারির সিগন্যাল শুধু এই বট ও চ্যাটে যাবে। কীভাবে: ১) @BotFather থেকে নতুন বট বানিয়ে টোকেন নিন। ২) বটকে একবার /start পাঠান। ৩) @userinfobot থেকে চ্যাট আইডি নিন।</div>
 </div>
 
 <div class="card">
@@ -229,7 +246,7 @@ $("runScan").onclick = async () => {
 
 // ---------------- market watch + chart
 const OFF = 6 * 3600;
-let chart = null, series = null, curPair = "EUR/USD", lastStats = {}, bars = [], marketRows = {}, decimals = 5;
+let chart = null, series = null, curPair = "EUR/USD", lastStats = {}, bars = [], marketRows = {}, decimals = 5, curTf = 5;
 function initChart() {
   if (chart || !window.LightweightCharts) return;
   chart = LightweightCharts.createChart($("chart"), {
@@ -249,18 +266,18 @@ const FIRST_BARS = 300, MAX_BARS_REQ = 5000;
 const toBar = (c) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close });
 function paintBars() { series.setData(bars.map((c) => ({ ...c, time: c.time + OFF }))); }
 function drawMarks() {
-  const first = bars.length ? bars[0].time : 0, marks = [];
+  const first = bars.length ? bars[0].time : 0, marks = [], al = (t) => t - (t % (curTf * 60));
   lastSigs.forEach((r) => {
-    if (r.candle_time < first) return;
+    if (al(r.candle_time) < first) return;
     const up = r.direction === "BUY";
     const col = OUT_COLOR[r.outcome] || "#f5b942";
     marks.push({
-      time: r.candle_time + OFF, position: up ? "belowBar" : "aboveBar", shape: up ? "arrowUp" : "arrowDown", color: col,
+      time: al(r.candle_time) + OFF, position: up ? "belowBar" : "aboveBar", shape: up ? "arrowUp" : "arrowDown", color: col,
       text: (up ? "CALL " : "PUT ") + (OUT_TEXT[r.outcome] || r.outcome) + " · " + r.expiry_min + "m",
     });
     if (r.outcome === "WIN" || r.outcome === "LOSS" || r.outcome === "DRAW") {
       marks.push({
-        time: r.expire_time - 300 + OFF, position: up ? "aboveBar" : "belowBar", shape: "circle", color: col,
+        time: al(r.expire_time - 300) + OFF, position: up ? "aboveBar" : "belowBar", shape: "circle", color: col,
         text: r.outcome === "WIN" ? "✔" : (r.outcome === "LOSS" ? "✖" : "="),
       });
     }
@@ -274,12 +291,12 @@ async function loadChart(reset) {
   initChart();
   if (!series) { $("chartMsg").textContent = "চার্ট লাইব্রেরি লোড হয়নি (ইন্টারনেট চেক করুন)"; return; }
   const my = ++chartReq;
-  const pair = curPair, enc = encodeURIComponent(pair);
+  const pair = curPair, enc = encodeURIComponent(pair), key = pair + "|" + curTf, tfq = "&tf=" + curTf;
   try {
-    const incremental = !reset && bars.length > 0 && barsPair === pair;
+    const incremental = !reset && bars.length > 0 && barsPair === key;
     const url = incremental
-      ? "/api/binary/candles?pair=" + enc + "&bars=60&since=" + (bars[bars.length - 1].time - 600)
-      : "/api/binary/candles?pair=" + enc + "&bars=" + FIRST_BARS;
+      ? "/api/binary/candles?pair=" + enc + "&bars=60&since=" + (bars[bars.length - 1].time - 600) + tfq
+      : "/api/binary/candles?pair=" + enc + "&bars=" + FIRST_BARS + tfq;
     const [cd, sg] = await Promise.all([api(url), api("/api/binary/signals?limit=200&pair=" + enc)]);
     if (my !== chartReq) return;
     decimals = cd.decimals;
@@ -291,12 +308,12 @@ async function loadChart(reset) {
     } else {
       bars = cd.candles.map(toBar);
     }
-    barsPair = pair;
+    barsPair = key;
     paintBars();
     lastSigs = sg.signals;
     drawMarks();
     if (reset) { chart.timeScale().fitContent(); extendHistory(pair); }
-    $("chartTitle").textContent = pair + " · M5 · " + bars.length + " ক্যান্ডেল";
+    $("chartTitle").textContent = pair + " · M" + curTf + " · " + bars.length + " ক্যান্ডেল";
   } catch (e) {
     if (reset !== false && series) { bars = []; barsPair = null; series.setData([]); series.setMarkers([]); }
     $("chartMsg").textContent = curPair + ": " + e.message;
@@ -307,8 +324,9 @@ async function loadChart(reset) {
 async function extendHistory(pair) {
   const my = ++histReq;
   try {
-    const cd = await api("/api/binary/candles?pair=" + encodeURIComponent(pair) + "&bars=" + MAX_BARS_REQ);
-    if (my !== histReq || pair !== curPair || barsPair !== pair) return;
+    const key = pair + "|" + curTf;
+    const cd = await api("/api/binary/candles?pair=" + encodeURIComponent(pair) + "&bars=" + MAX_BARS_REQ + "&tf=" + curTf);
+    if (my !== histReq || pair !== curPair || barsPair !== key) return;
     const list = cd.candles.map(toBar);
     if (list.length <= bars.length || !bars.length) return;
     const range = chart.timeScale().getVisibleLogicalRange();
@@ -317,7 +335,7 @@ async function extendHistory(pair) {
     paintBars();
     if (range && shift) chart.timeScale().setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift });
     drawMarks();
-    $("chartTitle").textContent = pair + " · M5 · " + bars.length + " ক্যান্ডেল";
+    $("chartTitle").textContent = pair + " · M" + curTf + " · " + bars.length + " ক্যান্ডেল";
   } catch (e) { /* the first 300 candles are already on screen */ }
 }
 
@@ -352,12 +370,13 @@ function selectPair(p) {
   $("chart").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 $("chartSel").onchange = () => selectPair($("chartSel").value);
+$("tfSel").onchange = () => { curTf = Number($("tfSel").value); loadChart(true); };
 
 // ---------------- live movement (price stream -> last candle + market table)
 function decOf(pair) { return pair.endsWith("JPY") ? 3 : 5; }
 function applyLive(price, ts) {
   if (!series || !bars.length) return;
-  const step = 300, t = Math.floor(ts / step) * step, last = bars[bars.length - 1];
+  const step = curTf * 60, t = Math.floor(ts / step) * step, last = bars[bars.length - 1];
   if (t < last.time) return;
   const range = chart.timeScale().getVisibleLogicalRange();
   const following = !range || range.to >= bars.length - 2;
@@ -425,6 +444,48 @@ loadBt().catch(() => {});
   setInterval(() => loadChart(false), 30000);
   setInterval(loadMarket, 60000);
 })();
+
+// ---------------- separate Telegram system for Binary
+async function btgCall(url, body) {
+  try {
+    const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    let data = {};
+    try { data = await r.json(); } catch (e) { /* empty body */ }
+    return { ok: r.ok, data };
+  } catch (e) { return { ok: false, data: { detail: "সার্ভারের সাথে সংযোগ হয়নি" } }; }
+}
+const btgBody = () => ({
+  token: $("btg-token").value.trim(), chat_id: $("btg-chat").value.trim(), admin_key: $("btg-admin").value,
+  enabled: $("btg-enabled").checked, notify_new: $("btg-new").checked, notify_result: $("btg-result").checked,
+});
+function btgRender(d) {
+  $("btg-status").textContent = d.configured
+    ? "সংযুক্ত · টোকেন " + d.token_hint + " · চ্যাট " + d.chat_id + " · " + (d.enabled ? "চালু" : "বন্ধ")
+    : "এখনো সংযুক্ত নয় (বাইনারির সিগন্যাল টেলিগ্রামে যাবে না)";
+  if (document.activeElement !== $("btg-chat")) $("btg-chat").value = d.chat_id || "";
+  $("btg-enabled").checked = d.enabled; $("btg-new").checked = d.notify_new; $("btg-result").checked = d.notify_result;
+  $("btg-admin").style.display = d.admin_protected ? "block" : "none";
+}
+async function btgLoad() {
+  try { btgRender(await api("/api/binary/telegram")); } catch (e) { $("btg-status").textContent = "লোড করা যায়নি"; }
+}
+$("btg-save").addEventListener("click", async () => {
+  $("btg-msg").textContent = "সংরক্ষণ হচ্ছে...";
+  const { ok, data } = await btgCall("/api/binary/telegram/save", btgBody());
+  if (ok) { $("btg-token").value = ""; btgRender(data); $("btg-msg").textContent = "সংরক্ষিত। এবার টেস্ট মেসেজ পাঠিয়ে দেখুন।"; }
+  else $("btg-msg").textContent = "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+});
+$("btg-test").addEventListener("click", async () => {
+  $("btg-msg").textContent = "পাঠানো হচ্ছে...";
+  const { ok, data } = await btgCall("/api/binary/telegram/test", { admin_key: $("btg-admin").value });
+  $("btg-msg").textContent = ok ? (data.ok ? "টেস্ট মেসেজ গেছে, টেলিগ্রাম দেখুন ✓" : "ব্যর্থ: " + data.error) : "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+});
+$("btg-clear").addEventListener("click", async () => {
+  if (!confirm("বাইনারির টোকেন ও চ্যাট আইডি মুছে ফেলবেন?")) return;
+  const { ok, data } = await btgCall("/api/binary/telegram/clear", { admin_key: $("btg-admin").value });
+  if (ok) { btgRender(data); $("btg-msg").textContent = "মুছে ফেলা হয়েছে"; } else $("btg-msg").textContent = "ব্যর্থ: " + (data.detail || "অজানা ত্রুটি");
+});
+btgLoad();
 </script>
 </body>
 </html>

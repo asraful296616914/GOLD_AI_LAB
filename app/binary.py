@@ -21,7 +21,7 @@ router = APIRouter()
 PAIRS = ["EUR/USD", "USD/JPY"]
 BASE_TF = "5"
 BAR_SEC = 300
-EXPIRIES = (1, 3)  # in M5 candles -> 5 and 15 minutes
+EXPIRIES = (1, 2, 3)  # in M5 candles -> 5, 10 and 15 minutes
 WINDOW = 300
 MIN_BARS = 60
 
@@ -416,9 +416,46 @@ def format_result(row, outcome):
     )
 
 
+TG_CACHE = {"at": 0.0, "data": None}
+TG_LAST_TEST = {"at": 0.0}
+
+
+async def tg_load(force=False):
+    """Binary has its OWN bot token / chat id (stored as binary_telegram_*); it never uses the gold bot."""
+    if not force and TG_CACHE["data"] is not None and time.time() - TG_CACHE["at"] < 60:
+        return TG_CACHE["data"]
+    stored = {}
+    try:
+        await asyncio.to_thread(db_exec, notify.DDL)
+        rows = await asyncio.to_thread(db_rows, "SELECT key, value FROM ai_settings WHERE key LIKE 'binary_telegram_%'")
+        stored = {row["key"]: row["value"] for row in rows}
+    except Exception:
+        logger.warning("Could not load binary telegram settings")
+    cfg = {
+        "token": (stored.get("binary_telegram_token") or os.getenv("BINARY_TELEGRAM_BOT_TOKEN", "")).strip(),
+        "chat_id": (stored.get("binary_telegram_chat_id") or os.getenv("BINARY_TELEGRAM_CHAT_ID", "")).strip(),
+        "enabled": stored.get("binary_telegram_enabled", "1") == "1",
+        "notify_new": stored.get("binary_telegram_new", "1") == "1",
+        "notify_result": stored.get("binary_telegram_result", "1") == "1",
+    }
+    TG_CACHE.update(at=time.time(), data=cfg)
+    return cfg
+
+
+async def tg_store(values):
+    await asyncio.to_thread(db_exec, notify.DDL)
+    for key, value in values.items():
+        await asyncio.to_thread(
+            db_exec,
+            "INSERT INTO ai_settings (key, value) VALUES (:key, :value) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            {"key": key, "value": value},
+        )
+    TG_CACHE["data"] = None
+
+
 async def tg_send(text_value, kind):
     try:
-        cfg = await notify.load_settings()
+        cfg = await tg_load()
         if not (cfg["enabled"] and cfg["token"] and cfg["chat_id"]):
             return False
         if kind == "new" and not cfg["notify_new"]:
@@ -630,10 +667,30 @@ HISTORY = {}          # pair -> {"c": {time: candle}, "tail_at": ts, "reason": s
 HIST_LOCKS = {}
 
 
-async def chart_candles(pair, bars=300, since=None):
+def aggregate(candles, tf):
+    """Build M10 / M15 candles from M5 candles (aligned to the timeframe boundary; the last one may still be forming)."""
+    if tf == 5:
+        return candles
+    size = tf * 60
+    out, cur = [], None
+    for c in candles:
+        bucket = c["time"] - c["time"] % size
+        if cur is None or cur["time"] != bucket:
+            cur = {"time": bucket, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"]}
+            out.append(cur)
+        else:
+            cur["high"] = max(cur["high"], c["high"])
+            cur["low"] = min(cur["low"], c["low"])
+            cur["close"] = c["close"]
+    return out
+
+
+async def chart_candles(pair, bars=300, since=None, tf=5):
     """Fast, deep candle history. Newest candles come from one small request; older history is fetched in parallel
     chunks once, kept in memory and only extended afterwards."""
-    bars = max(1, min(int(bars), MAX_BARS))
+    factor = max(1, int(tf) // 5)
+    bars = max(1, int(bars))
+    want = min(bars * factor + factor, MAX_BARS)      # M5 candles needed to build `bars` candles of this timeframe
     m = _m()
     await resolve_symbols(m)
     if not feed_ok(pair):
@@ -651,8 +708,8 @@ async def chart_candles(pair, bars=300, since=None):
                 h["c"][c["time"]] = c
             h["reason"], h["tail_at"] = reason, time.time()
         # 2) older history: parallel waves of chunks, only while we hold fewer candles than asked for
-        retry_ok = not (h["ext_bars"] >= bars and time.time() - h["ext_at"] < 600)
-        if len(h["c"]) < bars and retry_ok and since is None:
+        retry_ok = not (h["ext_bars"] >= want and time.time() - h["ext_at"] < 600)
+        if len(h["c"]) < want and retry_ok and since is None:
             gate = asyncio.Semaphore(PARALLEL)
             oldest = min(h["c"]) if h["c"] else now
             span = CHUNK_BARS * BAR_SEC
@@ -662,7 +719,7 @@ async def chart_candles(pair, bars=300, since=None):
                     return await probe(m, symbol, BASE_TF, end - span, end)
 
             for _wave in range(8):
-                if len(h["c"]) >= bars:
+                if len(h["c"]) >= want:
                     break
                 ends = [oldest - 1 - i * span for i in range(PARALLEL)]
                 results = await asyncio.gather(*(one(e) for e in ends))
@@ -675,7 +732,7 @@ async def chart_candles(pair, bars=300, since=None):
                 oldest -= PARALLEL * span
                 if failed:
                     break
-            h["ext_bars"], h["ext_at"] = bars, time.time()
+            h["ext_bars"], h["ext_at"] = want, time.time()
         if len(h["c"]) > MAX_BARS + 500:
             for t in sorted(h["c"])[: len(h["c"]) - MAX_BARS]:
                 h["c"].pop(t, None)
@@ -684,9 +741,12 @@ async def chart_candles(pair, bars=300, since=None):
             raise HTTPException(status_code=404, detail="ডেটা নেই — " + ("মার্কেট বন্ধ বা ডেটা আসেনি" if reason in ("ok", "no_data") else reason))
         ordered = [h["c"][t] for t in sorted(h["c"])]
     if since is not None:
-        return [c for c in ordered if c["time"] >= since]
-    CANDLE_CACHE[pair] = (time.time(), ordered[-bars:])
-    return ordered[-bars:]
+        size = int(tf) * 60
+        return [c for c in aggregate([c for c in ordered if c["time"] >= since - size], int(tf)) if c["time"] >= since]
+    series_out = aggregate(ordered[-want:], int(tf))[-bars:]
+    if int(tf) == 5:
+        CANDLE_CACHE[pair] = (time.time(), series_out)
+    return series_out
 
 
 async def market_overview():
@@ -894,17 +954,77 @@ async def binary_stats():
 
 @router.get("/api/binary/candles")
 async def binary_candles(pair: str = Query("EUR/USD"), bars: int = Query(300, ge=60, le=MAX_BARS),
-                         since: int | None = Query(None, ge=0)):
+                         since: int | None = Query(None, ge=0), tf: int = Query(5)):
     if pair not in PAIRS:
         raise HTTPException(status_code=400, detail="অজানা পেয়ার")
+    if tf not in (5, 10, 15):
+        raise HTTPException(status_code=400, detail="টাইমফ্রেম হবে ৫, ১০ বা ১৫ মিনিট")
     try:
-        candles = await chart_candles(pair, bars, since)
+        candles = await chart_candles(pair, bars, since, tf)
     except HTTPException:
         raise
     except Exception as error:
         logger.warning("Binary candles failed for %s (%s)", pair, type(error).__name__)
         raise HTTPException(status_code=502, detail="চার্টের ডেটা আনা যায়নি")
-    return {"pair": pair, "decimals": decimals(pair), "candles": candles, "count": len(candles), "max_bars": MAX_BARS}
+    return {"pair": pair, "decimals": decimals(pair), "candles": candles, "count": len(candles), "tf": tf, "max_bars": MAX_BARS}
+
+
+async def tg_status():
+    cfg = await tg_load(force=True)
+    return {
+        "configured": bool(cfg["token"] and cfg["chat_id"]),
+        "token_hint": ("…" + cfg["token"][-4:]) if cfg["token"] else "",
+        "chat_id": cfg["chat_id"],
+        "enabled": cfg["enabled"], "notify_new": cfg["notify_new"], "notify_result": cfg["notify_result"],
+        "admin_protected": bool(os.getenv("ADMIN_KEY", "")),
+    }
+
+
+@router.get("/api/binary/telegram")
+async def binary_tg_status():
+    return await tg_status()
+
+
+@router.post("/api/binary/telegram/save")
+async def binary_tg_save(request: Request):
+    payload = await notify._payload(request)
+    notify._check_admin(payload)
+    values = {}
+    token = str(payload.get("token", "")).strip()
+    chat_id = str(payload.get("chat_id", "")).strip()
+    if token:
+        if not notify.TOKEN_RE.match(token):
+            raise HTTPException(status_code=400, detail="টোকেনের ফরম্যাট ঠিক নয় (যেমন 123456789:AA...)")
+        values["binary_telegram_token"] = token
+    if chat_id:
+        if not notify.CHAT_RE.match(chat_id):
+            raise HTTPException(status_code=400, detail="চ্যাট আইডি ঠিক নয় (সংখ্যা, অথবা @চ্যানেলনাম)")
+        values["binary_telegram_chat_id"] = chat_id
+    values["binary_telegram_enabled"] = "1" if payload.get("enabled", True) else "0"
+    values["binary_telegram_new"] = "1" if payload.get("notify_new", True) else "0"
+    values["binary_telegram_result"] = "1" if payload.get("notify_result", True) else "0"
+    await tg_store(values)
+    return await tg_status()
+
+
+@router.post("/api/binary/telegram/test")
+async def binary_tg_test(request: Request):
+    payload = await notify._payload(request)
+    notify._check_admin(payload)
+    if time.time() - TG_LAST_TEST["at"] < 10:
+        raise HTTPException(status_code=429, detail="কয়েক সেকেন্ড পরে আবার চেষ্টা করুন")
+    TG_LAST_TEST["at"] = time.time()
+    cfg = await tg_load(force=True)
+    ok, error = await notify.send("✅ GOLD AI LAB · বাইনারি: টেলিগ্রাম সংযোগ ঠিক আছে। ৫, ১০ ও ১৫ মিনিটের সিগন্যাল ও ফলাফল এখানে আসবে।", cfg)
+    return {"ok": ok, "error": error}
+
+
+@router.post("/api/binary/telegram/clear")
+async def binary_tg_clear(request: Request):
+    payload = await notify._payload(request)
+    notify._check_admin(payload)
+    await tg_store({"binary_telegram_token": "", "binary_telegram_chat_id": ""})
+    return await tg_status()
 
 
 @router.get("/api/binary/market")
