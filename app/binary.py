@@ -18,11 +18,7 @@ from app import backtest, notify
 logger = logging.getLogger("gold-ai-lab.binary")
 router = APIRouter()
 
-PAIRS = [
-    "EUR/JPY", "CAD/JPY", "GBP/JPY", "EUR/USD", "EUR/CAD", "USD/JPY",
-    "AUD/CAD", "AUD/CHF", "EUR/AUD", "GBP/CAD", "GBP/AUD", "AUD/USD",
-    "GBP/CHF", "CHF/JPY", "EUR/CHF", "USD/CAD", "USD/CHF", "EUR/GBP",
-]
+PAIRS = ["EUR/USD", "USD/JPY"]
 BASE_TF = "5"
 BAR_SEC = 300
 EXPIRIES = (1, 3)  # in M5 candles -> 5 and 15 minutes
@@ -308,8 +304,16 @@ def load_approved(result):
     if not result:
         return
     for row in result.get("rows", []):
-        if row.get("approved"):
+        if row.get("approved") and row["pair"] in PAIRS:
             APPROVED[(row["pair"], row["strategy"], row["expiry_min"])] = row
+
+
+def only_current_pairs(data):
+    """Old backtests may contain pairs that are no longer traded: drop them."""
+    data["rows"] = [r for r in data.get("rows", []) if r.get("pair") in PAIRS]
+    data["pairs"] = [p for p in data.get("pairs", []) if p.get("pair") in PAIRS]
+    data["approved"] = sum(1 for r in data["rows"] if r.get("approved"))
+    return data
 
 
 async def latest_result():
@@ -319,7 +323,7 @@ async def latest_result():
     try:
         data = json.loads(rows[0]["result"])
         data["created_at"] = int(rows[0]["created_at"])
-        return data
+        return only_current_pairs(data)
     except Exception:
         return None
 
@@ -541,6 +545,11 @@ async def resolve_open():
     symbols = await resolve_symbols(m)
     done = 0
     for row in rows:
+        if row["pair"] not in symbols:
+            await asyncio.to_thread(
+                db_exec, "UPDATE binary_signals SET outcome = 'VOID', resolved_at = :t WHERE id = :id", {"t": now, "id": row["id"]}
+            )
+            continue
         try:
             candles = await backtest.fetch_range(m, symbols[row["pair"]], BASE_TF, row["entry_time"] - BAR_SEC, row["expire_time"] + BAR_SEC)
             target = row["expire_time"] - BAR_SEC
@@ -812,7 +821,11 @@ async def binary_scan(request: Request):
 async def binary_signals(limit: int = Query(50, ge=1, le=200), pair: str = Query("")):
     if pair and pair not in PAIRS:
         raise HTTPException(status_code=400, detail="অজানা পেয়ার")
-    where, params = ("WHERE pair = :pair", {"pair": pair, "limit": limit}) if pair else ("", {"limit": limit})
+    if pair:
+        where, params = "WHERE pair = :pair", {"pair": pair, "limit": limit}
+    else:
+        names = {f"p{i}": p for i, p in enumerate(PAIRS)}
+        where, params = "WHERE pair IN (" + ", ".join(f":{k}" for k in names) + ")", {**names, "limit": limit}
     rows = await asyncio.to_thread(db_rows, f"SELECT * FROM binary_signals {where} ORDER BY id DESC LIMIT :limit", params)
     return {"signals": rows}
 
@@ -826,6 +839,8 @@ async def binary_stats():
     total = {"WIN": 0, "LOSS": 0, "DRAW": 0, "OPEN": 0, "VOID": 0}
     per_pair = {}
     for row in rows:
+        if row["pair"] not in PAIRS:
+            continue
         total[row["outcome"]] = total.get(row["outcome"], 0) + int(row["n"])
         slot = per_pair.setdefault(row["pair"], {"WIN": 0, "LOSS": 0, "DRAW": 0, "OPEN": 0, "VOID": 0})
         slot[row["outcome"]] = slot.get(row["outcome"], 0) + int(row["n"])
