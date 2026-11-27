@@ -26,7 +26,7 @@ WINDOW = 300
 MIN_BARS = 60
 
 MIN_WIN = float(os.getenv("BINARY_MIN_WIN", "60"))        # backtest win rate must be ABOVE this (%)
-MIN_TRADES = int(os.getenv("BINARY_MIN_TRADES", "30"))    # minimum decided trades in the backtest
+MIN_TRADES = int(os.getenv("BINARY_MIN_TRADES", "50"))    # minimum decided trades in the backtest
 BT_DAYS = int(os.getenv("BINARY_BACKTEST_DAYS", "30"))
 BT_HOURS = max(1.0, float(os.getenv("BINARY_BACKTEST_HOURS", "12")))
 AUTO = os.getenv("BINARY_AUTO", "1") == "1"
@@ -216,7 +216,7 @@ async def probe(m, symbol, resolution, start, end):
 
 def gather(m, sg, window, htf_window, atr):
     """All strategies of the gold lab, reused here only for their BUY/SELL direction."""
-    from app import smc, classic, classic2, patterns
+    from app import smc, classic, classic2, patterns, binary_strats
 
     found = []
     for source in (
@@ -224,6 +224,7 @@ def gather(m, sg, window, htf_window, atr):
         lambda: classic.analyze(m, window, atr),
         lambda: classic2.analyze(m, window, atr),
         lambda: patterns.analyze(m, window, atr),
+        lambda: binary_strats.analyze(window, atr),
     ):
         try:
             found.extend(source())
